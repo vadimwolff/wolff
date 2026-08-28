@@ -40,6 +40,8 @@
         msgs: [],               // сообщения активной комнаты
         reads: {},              // room_id -> {user_id: iso}
         selectedRoom: null,     // выделение долгим нажатием
+        pickerOpen: null,       // id сообщения с открытым меню реакций
+        pendingRender: false,   // перерисовка, отложенная до закрытия меню
         registerMode: false,
         page: 'auth',
         search: '',
@@ -979,6 +981,8 @@
         state.activeRoom = room;
         state.activeChat = chat;
         state.msgs = [];
+        state.pickerOpen = null;
+        state.pendingRender = false;
         $('msg-list').innerHTML = '<div class="typing-hint">Загрузка…</div>';
         updateChatHeader();
         showPage('chat', true);
@@ -995,6 +999,7 @@
 
     function closeChat() {
         stopChatTimer();
+        closePicker();
         state.activeRoom = null;
         state.activeChat = null;
         state.msgs = [];
@@ -1126,6 +1131,10 @@
         var box = $('msg-list');
         if (!state.activeRoom) return;
 
+        // пока открыто меню реакций, не пересобираем список — иначе меню
+        // исчезает прямо под пальцем на очередном опросе сервера
+        if (state.pickerOpen) { state.pendingRender = true; return; }
+
         if (!state.msgs.length) {
             box.innerHTML = '<div class="empty-state"><div class="ico">👋</div>' +
                 '<b>Сообщений пока нет</b><p>Напишите первым</p></div>';
@@ -1245,6 +1254,12 @@
     function closePicker() {
         var old = document.querySelector('.reaction-picker');
         if (old) old.parentNode.removeChild(old);
+        state.pickerOpen = null;
+        // перерисовку, отложенную на время открытого меню, выполняем сейчас
+        if (state.pendingRender) {
+            state.pendingRender = false;
+            renderMessages(false);
+        }
     }
 
     function openPicker(bubble, msgId) {
@@ -1252,6 +1267,7 @@
         var msg = state.msgs.filter(function (m) { return m.id === msgId; })[0];
         if (!msg || msg.pending) return;
 
+        state.pickerOpen = msgId;
         var picker = document.createElement('div');
         picker.className = 'reaction-picker';
         picker.innerHTML = EMOJIS.map(function (e) {
