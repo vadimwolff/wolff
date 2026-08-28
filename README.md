@@ -56,7 +56,11 @@ bcrypt-хеша, а старые пароли открытым текстом а
 ## 3. Вариант B — GitHub Pages
 
 1. **Settings → Pages → Build and deployment → Source: GitHub Actions**.
-2. Отправьте изменения в ветку `main` — workflow [`.github/workflows/pages.yml`](.github/workflows/pages.yml)
+   Этот шаг обязателен и делается вручную: токен GitHub Actions не имеет прав
+   создавать сайт Pages, поэтому до включения деплой падает с ошибкой
+   `Create Pages site failed. Resource not accessible by integration`.
+2. **Actions → Deploy to GitHub Pages → Run workflow** (или любой push в `main`) —
+   workflow [`.github/workflows/pages.yml`](.github/workflows/pages.yml)
    опубликует сайт на `https://<логин>.github.io/<репозиторий>/`.
 
 GitHub Pages отдаёт только статику, серверного прокси там нет, поэтому браузер
