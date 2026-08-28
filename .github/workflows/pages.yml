@@ -31,7 +31,11 @@ jobs:
           # Jekyll не нужен, иначе он может съесть служебные файлы
           touch _site/.nojekyll
 
+      # enablement: true включает Pages в репозитории автоматически,
+      # если это ещё не сделано вручную в Settings → Pages
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - uses: actions/upload-pages-artifact@v3
         with:
