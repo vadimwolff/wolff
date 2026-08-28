@@ -1,0 +1,40 @@
+/* ==========================================================================
+ * WolffMsg — конфигурация подключения
+ *
+ * Приложение работает с любым PostgREST-совместимым адресом (Supabase REST).
+ * Список ниже перебирается сверху вниз: первый ответивший адрес становится
+ * рабочим и запоминается. Это нужно, чтобы сайт продолжал работать из сетей,
+ * где часть доменов недоступна.
+ * ========================================================================== */
+
+window.WM_CONFIG = {
+    /* Публичный anon-ключ Supabase. Он предназначен для клиента и не является
+       секретом; доступ к данным ограничивается политиками RLS в базе. */
+    apiKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ6Z2l5YWZwa2VxdmJwcW9tYmtyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3NzU5MTksImV4cCI6MjA5NDM1MTkxOX0.qvKNRcO-ylrWzOFYxEvWhcGBeSCxoanZx4i1VnhF7_w",
+
+    endpoints: [
+        {
+            /* Работает, когда сайт развёрнут на Vercel: запрос идёт на тот же
+               домен, что и сайт, и уже сервер обращается к Supabase. Самый
+               надёжный вариант для России — сторонние домены не задействуются. */
+            url: "same-origin:/api/db",
+            label: "Через сервер сайта"
+        },
+        {
+            url: "https://myproxy.vadimwolff2000.workers.dev/rest/v1",
+            label: "Прокси Cloudflare"
+        },
+        {
+            url: "https://rzgiyafpkeqvbpqombkr.supabase.co/rest/v1",
+            label: "Supabase напрямую"
+        }
+    ],
+
+    /* Интервалы опроса сервера, мс */
+    pollChatMs: 2000,
+    pollListMs: 5000,
+
+    /* Ограничения на загружаемые изображения */
+    imageMaxSide: 1280,
+    imageQuality: 0.72
+};

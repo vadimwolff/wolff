@@ -1,0 +1,14 @@
+{
+  "name": "wolffmsg",
+  "version": "49.0.0",
+  "private": true,
+  "description": "WolffMsg — веб-мессенджер на статике + Supabase REST",
+  "type": "module",
+  "scripts": {
+    "dev": "node tools/mock-postgrest.mjs 8123",
+    "test": "node tools/run-tests.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

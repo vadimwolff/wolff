@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<meta name="description" content="WolffMsg — лёгкий веб-мессенджер">
+<title>WolffMsg</title>
+<link rel="manifest" href="assets/manifest.webmanifest">
+<link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/icon.svg">
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body class="theme-dark">
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<div id="net-banner" hidden>
+    <span id="net-banner-text">Нет связи с сервером</span>
+    <button type="button" onclick="WM.reconnect()">Повторить</button>
+    <button type="button" onclick="WM.openConnection()">Настроить</button>
+</div>
+
+<!-- ================= АВТОРИЗАЦИЯ ================= -->
+<div id="page-auth" class="page active">
+    <div class="auth-container">
+        <div class="auth-logo">🐺</div>
+        <h1 id="auth-title">С возвращением!</h1>
+        <p id="auth-subtitle" class="auth-sub">Войдите в свой аккаунт WolffMsg</p>
+
+        <form id="auth-form" autocomplete="on" novalidate>
+            <input type="text" id="a-nick" class="auth-input" placeholder="@никнейм"
+                   autocomplete="username" autocapitalize="none" spellcheck="false">
+            <input type="text" id="a-name" class="auth-input" placeholder="Ваше имя" hidden autocomplete="name">
+            <input type="password" id="a-pass" class="auth-input" placeholder="пароль" autocomplete="current-password">
+            <button type="submit" class="auth-btn" id="auth-btn">Войти</button>
+        </form>
+
+        <p class="auth-swap" id="auth-swap-btn">Создать новый аккаунт</p>
+        <p class="auth-hint" id="auth-status"></p>
+    </div>
+</div>
+
+<!-- ================= СПИСОК ЧАТОВ ================= -->
+<div id="page-main" class="page">
+    <header>
+        <span class="hdr-btn" id="btn-settings" title="Настройки">⚙️</span>
+        <b id="main-greeting">Чаты</b>
+        <span class="hdr-btn accent" id="btn-plus" title="Новый чат">＋</span>
+    </header>
+
+    <div class="search-row">
+        <input type="search" id="chat-search" placeholder="Поиск по чатам" autocomplete="off">
+    </div>
+
+    <div id="context-bar">
+        <span id="ctx-close" title="Отменить">✕</span>
+        <span id="ctx-pin">📌 Закрепить</span>
+        <span id="ctx-mute">🔔 Звук</span>
+        <span id="ctx-delete" class="danger">🗑 Удалить</span>
+    </div>
+
+    <div id="chat-list" class="chat-list-container"></div>
+</div>
+
+<!-- ================= ЧАТ ================= -->
+<div id="page-chat" class="page">
+    <header>
+        <span class="hdr-btn accent" id="btn-back">‹ Назад</span>
+        <div class="chat-head">
+            <b id="chat-title">Чат</b>
+            <small id="chat-subtitle"></small>
+        </div>
+        <span class="hdr-btn" id="btn-chat-menu" title="Меню чата">⋮</span>
+    </header>
+
+    <div id="chat-actions-menu" class="popup-menu" hidden>
+        <div class="action-item" id="act-invite"><span>➕</span> Добавить участника</div>
+        <div class="action-item" id="act-mute"><span>🔔</span> Уведомления</div>
+        <div class="action-item" id="act-clear"><span>🧹</span> Очистить историю</div>
+        <div class="action-item danger" id="act-delete"><span>🗑️</span> Удалить чат</div>
+    </div>
+
+    <div id="msg-list" class="msg-container"></div>
+
+    <div class="input-bar">
+        <button type="button" id="btn-attach" title="Прикрепить фото">📎</button>
+        <input type="file" id="m-file" accept="image/*" hidden>
+        <textarea id="m-input" rows="1" placeholder="Сообщение..."></textarea>
+        <button type="button" id="btn-send" class="send" title="Отправить">➤</button>
+    </div>
+</div>
+
+<!-- ================= НАСТРОЙКИ ================= -->
+<div id="page-settings" class="page">
+    <header>
+        <span class="hdr-btn accent" id="btn-settings-done">Готово</span>
+        <b>Настройки</b>
+        <span class="hdr-btn ghost">⚙️</span>
+    </header>
+
+    <div class="settings-content">
+        <div class="profile-card">
+            <div class="av-wrap">
+                <img id="s-av" class="profile-av" alt="Аватар">
+                <div class="av-badge">📷</div>
+            </div>
+            <input type="file" id="s-file" accept="image/*" hidden>
+            <h2 id="s-name">Имя</h2>
+            <p id="s-nick" class="muted">@nick</p>
+        </div>
+
+        <p class="group-title">ТЕМА ОФОРМЛЕНИЯ</p>
+        <div class="theme-scroll" id="theme-scroll"></div>
+
+        <p class="group-title">АККАУНТ</p>
+        <div class="settings-group">
+            <div class="settings-item" id="set-name"><i>👤</i> Изменить имя</div>
+            <div class="settings-item" id="set-pass"><i>🔑</i> Изменить пароль</div>
+            <div class="settings-item" id="set-conn"><i>🌐</i> Соединение <span id="conn-state" class="pill">…</span></div>
+            <div class="settings-item" id="set-cache"><i>🧹</i> Очистить локальные данные</div>
+            <div class="settings-item danger" id="set-logout"><i>🚪</i> Выйти из системы</div>
+            <div class="settings-item danger" id="set-delete"><i>🗑️</i> Удалить аккаунт</div>
+        </div>
+
+        <p class="version">WolffMsg v49 · <span id="build-host"></span></p>
+    </div>
+</div>
+
+<!-- ================= МОДАЛКИ ================= -->
+<div id="plus-menu" class="modal-overlay">
+    <div class="modal-menu">
+        <div class="modal-item" id="plus-user">👤 Добавить пользователя</div>
+        <div class="modal-item" id="plus-group">👨‍👩‍👧 Создать группу</div>
+        <div class="modal-item cancel" id="plus-cancel">Отмена</div>
+    </div>
+</div>
+
+<div id="conn-modal" class="modal-overlay">
+    <div class="modal-sheet">
+        <h3>Соединение с сервером</h3>
+        <p class="muted small">Приложение само выбирает первый доступный адрес. Если в вашей сети
+            все адреса заблокированы — вставьте ссылку на свой прокси.</p>
+        <div id="conn-list" class="conn-list"></div>
+        <input type="url" id="conn-custom" class="auth-input" placeholder="https://ваш-прокси/rest/v1" autocapitalize="none" spellcheck="false">
+        <div class="sheet-row">
+            <button type="button" class="btn-flat" id="conn-reset">Сбросить</button>
+            <button type="button" class="btn-primary" id="conn-save">Проверить и сохранить</button>
+        </div>
+        <div class="modal-item cancel" id="conn-close">Закрыть</div>
+    </div>
+</div>
+
+<div id="prompt-modal" class="modal-overlay">
+    <div class="modal-sheet">
+        <h3 id="prompt-title">Ввод</h3>
+        <p id="prompt-text" class="muted small"></p>
+        <input type="text" id="prompt-input" class="auth-input">
+        <div class="sheet-row">
+            <button type="button" class="btn-flat" id="prompt-cancel">Отмена</button>
+            <button type="button" class="btn-primary" id="prompt-ok">ОК</button>
+        </div>
+    </div>
+</div>
+
+<div id="confirm-modal" class="modal-overlay">
+    <div class="modal-sheet">
+        <h3 id="confirm-title">Подтверждение</h3>
+        <p id="confirm-text" class="muted small"></p>
+        <div class="sheet-row">
+            <button type="button" class="btn-flat" id="confirm-cancel">Отмена</button>
+            <button type="button" class="btn-primary danger-btn" id="confirm-ok">Удалить</button>
+        </div>
+    </div>
+</div>
+
+<div id="lightbox" class="lightbox"><img id="lightbox-img" alt=""></div>
+
+<script src="assets/config.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>
