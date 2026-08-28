@@ -23,6 +23,14 @@ const PORT = Number(process.argv[2] || 8123);
    открытым текстом, без функций входа. Нужна для проверки совместимости. */
 const LEGACY = process.env.WM_LEGACY === '1';
 
+/* WM_DENY воспроизводит состояние Supabase сразу после применения schema.sql:
+   прямая запись в profiles уже запрещена правами, а кеш REST-API ещё не видит
+   функций входа и отдаёт на них 404.
+     warmup — первый вызов функции даёт 404, дальше кеш «прогрет»;
+     always — кеш не обновляется никогда. */
+const DENY = process.env.WM_DENY || '';
+let rpcCalls = 0;
+
 const db = {
     profiles: [],
     chats: [],
@@ -216,6 +224,17 @@ function handleApi(req, res, rest, body) {
 
     if (LEGACY && (parts[0] === 'rpc' || ['chats', 'room_reads', 'chat_previews'].includes(parts[0]))) {
         return json(res, 404, { code: 'PGRST205', message: 'relation not found (legacy mode)' });
+    }
+
+    if (DENY) {
+        if (parts[0] === 'rpc' && (DENY === 'always' || ++rpcCalls <= 1)) {
+            return json(res, 404, { code: 'PGRST202', message: 'function not found in schema cache' });
+        }
+        const denied = parts[0] === 'profiles' &&
+            (req.method === 'POST' || req.method === 'DELETE' || params.has('password'));
+        if (denied) {
+            return json(res, 403, { code: '42501', message: 'permission denied for table profiles' });
+        }
     }
 
     if (parts[0] === 'rpc') {

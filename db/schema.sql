@@ -232,3 +232,17 @@ grant execute on function public.wm_set_password(text, text, text)      to anon,
 
 -- Supabase Realtime (необязательно): мгновенная доставка вместо опроса
 -- alter publication supabase_realtime add table public.messages;
+
+-- ============================================================================
+--  Обновление кеша REST API.
+--
+--  PostgREST держит список таблиц и функций в памяти и не всегда подхватывает
+--  изменения сразу. Без этой команды приложение может некоторое время получать
+--  404 на wm_register / wm_login и падать с ошибкой
+--  «permission denied for table profiles».
+--
+--  Если ошибка всё же появилась — выполните эту строку отдельно и подождите
+--  около минуты.
+-- ============================================================================
+
+notify pgrst, 'reload schema';

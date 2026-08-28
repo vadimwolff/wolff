@@ -262,6 +262,25 @@
         return err && (err.status === 404 || err.code === 'PGRST202' || err.code === 'PGRST205');
     }
 
+    /* Отказ в правах: схема db/schema.sql применена (прямая запись в profiles
+       закрыта), но REST-кеш ещё отдаёт 404 на функции входа. */
+    function accessDenied(err) {
+        if (!err) return false;
+        if (err.code === '42501') return true;
+        if (err.status === 401 || err.status === 403) return true;
+        return /permission denied/i.test(err.message || '');
+    }
+
+    function schemaHint() {
+        return WMError('База ещё не готова принимать регистрацию. В Supabase → SQL Editor ' +
+            'выполните db/schema.sql, затем строку: notify pgrst, \'reload schema\'; ' +
+            'и повторите через минуту.');
+    }
+
+    function delay(ms) {
+        return new Promise(function (resolve) { setTimeout(resolve, ms); });
+    }
+
     function request(path, opts) {
         opts = opts || {};
         var attempt = 0;
@@ -281,8 +300,12 @@
                         var data = null;
                         if (txt) { try { data = JSON.parse(txt); } catch (e) { data = txt; } }
                         if (!res.ok) {
-                            throw WMError((data && data.message) || ('Ошибка ' + res.status),
-                                res.status, data && data.code);
+                            var text = (data && data.message) || ('Ошибка ' + res.status);
+                            var code = data && data.code;
+                            if (code === '42501' || /permission denied/i.test(text)) {
+                                text = 'Недостаточно прав в базе — проверьте, что выполнен db/schema.sql';
+                            }
+                            throw WMError(text, res.status, code);
                         }
                         return data;
                     });
@@ -390,6 +413,21 @@
     }
 
     function doRegister(nick, pass, name) {
+        return rpcRegister(nick, pass, name).catch(function (err) {
+            if (!missingRelation(err)) throw err;
+            return legacyRegister(nick, pass, name).catch(function (legacyErr) {
+                if (!accessDenied(legacyErr)) throw legacyErr;
+                // схема применена, но кеш API ещё не подхватил функции — ждём и пробуем снова
+                return delay(1500)
+                    .then(function () { return rpcRegister(nick, pass, name); })
+                    .catch(function (retryErr) {
+                        throw missingRelation(retryErr) ? schemaHint() : retryErr;
+                    });
+            });
+        });
+    }
+
+    function rpcRegister(nick, pass, name) {
         return rpc('wm_register', { p_nickname: nick, p_password: pass, p_name: name })
             .then(function (res) {
                 if (res && res.ok) return res.user;
@@ -399,10 +437,6 @@
                     weak_password: 'Пароль от 4 символов'
                 };
                 throw WMError((res && map[res.error]) || 'Не удалось зарегистрироваться');
-            })
-            .catch(function (err) {
-                if (!missingRelation(err)) throw err;
-                return legacyRegister(nick, pass, name);
             });
     }
 
@@ -423,18 +457,31 @@
     }
 
     function doLogin(nick, pass) {
-        return rpc('wm_login', { p_nickname: nick, p_password: pass })
-            .then(function (res) {
-                if (res && res.ok) return res.user;
-                throw WMError('Неверный никнейм или пароль');
-            })
-            .catch(function (err) {
-                if (!missingRelation(err)) throw err;
-                return request('/profiles?nickname=eq.' + q(nick) + '&password=eq.' + q(pass) + '&limit=1')
-                    .then(function (rows) {
-                        if (rows && rows.length) return rows[0];
-                        throw WMError('Неверный никнейм или пароль');
+        return rpcLogin(nick, pass).catch(function (err) {
+            if (!missingRelation(err)) throw err;
+            return legacyLogin(nick, pass).catch(function (legacyErr) {
+                if (!accessDenied(legacyErr)) throw legacyErr;
+                return delay(1500)
+                    .then(function () { return rpcLogin(nick, pass); })
+                    .catch(function (retryErr) {
+                        throw missingRelation(retryErr) ? schemaHint() : retryErr;
                     });
+            });
+        });
+    }
+
+    function rpcLogin(nick, pass) {
+        return rpc('wm_login', { p_nickname: nick, p_password: pass }).then(function (res) {
+            if (res && res.ok) return res.user;
+            throw WMError('Неверный никнейм или пароль');
+        });
+    }
+
+    function legacyLogin(nick, pass) {
+        return request('/profiles?nickname=eq.' + q(nick) + '&password=eq.' + q(pass) + '&limit=1')
+            .then(function (rows) {
+                if (rows && rows.length) return rows[0];
+                throw WMError('Неверный никнейм или пароль');
             });
     }
 

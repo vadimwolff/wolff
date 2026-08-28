@@ -6,33 +6,40 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-function start(port, legacy) {
+function start(port, extraEnv = {}) {
     return spawn(process.execPath, [path.join(ROOT, 'tools/mock-postgrest.mjs'), String(port)], {
         cwd: ROOT,
-        env: { ...process.env, WM_LEGACY: legacy ? '1' : '' },
+        env: { ...process.env, WM_LEGACY: '', WM_DENY: '', ...extraEnv },
         stdio: 'ignore'
     });
 }
 
-function run(script, base) {
+function run(script, env = {}) {
     return new Promise((resolve) => {
         const p = spawn(process.execPath, [path.join(ROOT, script)], {
             cwd: ROOT,
-            env: { ...process.env, WM_BASE: base },
+            env: { ...process.env, ...env },
             stdio: 'inherit'
         });
         p.on('exit', (code) => resolve(code || 0));
     });
 }
 
-const modern = start(8123, false);
-const legacy = start(8124, true);
+const servers = [
+    start(8123),                            // обычная схема
+    start(8124, { WM_LEGACY: '1' }),        // старая схема без функций входа
+    start(8125, { WM_DENY: 'warmup' }),     // кеш API прогревается
+    start(8126, { WM_DENY: 'always' })      // кеш API не обновился
+];
 await new Promise((r) => setTimeout(r, 1500));
 
 let code = 0;
-code += await run('tools/e2e.mjs', 'http://localhost:8123');
-code += await run('tools/e2e-legacy.mjs', 'http://localhost:8124');
+code += await run('tools/e2e.mjs', { WM_BASE: 'http://localhost:8123' });
+code += await run('tools/e2e-legacy.mjs', { WM_BASE: 'http://localhost:8124' });
+code += await run('tools/e2e-schema.mjs', {
+    WM_BASE_WARMUP: 'http://localhost:8125',
+    WM_BASE_ALWAYS: 'http://localhost:8126'
+});
 
-modern.kill();
-legacy.kill();
+servers.forEach((s) => s.kill());
 process.exit(code ? 1 : 0);
