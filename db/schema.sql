@@ -1,12 +1,32 @@
 -- ============================================================================
 --  WolffMsg — схема базы для Supabase (PostgreSQL)
 --
---  Запустить один раз в Supabase → SQL Editor → New query → Run.
---  Скрипт идемпотентный: его можно выполнять повторно и на уже существующей
---  базе — данные не удаляются, недостающие таблицы и колонки добавляются.
+--  Запустить в Supabase → SQL Editor → New query → Run.
+--
+--  Скрипт безопасен для существующей базы: ничего не удаляется, недостающее
+--  добавляется. Все шаги, способные завершиться ошибкой на «грязных» данных,
+--  обёрнуты в блоки с перехватом ошибок — Supabase выполняет скрипт одной
+--  транзакцией, и одна упавшая строка иначе откатывала бы всю установку.
+--
+--  В самом конце скрипт печатает отчёт: сколько функций создано и открыт ли
+--  доступ. Если что-то пошло не так — смотрите NOTICE в выводе.
 -- ============================================================================
 
-create extension if not exists pgcrypto;
+-- ------------------------------------------------- расширение для паролей ---
+-- В Supabase расширения ставятся в схему extensions, в «голом» PostgreSQL —
+-- в public. Поддерживаем оба варианта.
+create schema if not exists extensions;
+
+do $$
+begin
+    if not exists (select 1 from pg_extension where extname = 'pgcrypto') then
+        begin
+            execute 'create extension pgcrypto with schema extensions';
+        exception when others then
+            execute 'create extension pgcrypto';
+        end;
+    end if;
+end $$;
 
 -- ---------------------------------------------------------------- профили ---
 create table if not exists public.profiles (
@@ -19,14 +39,56 @@ create table if not exists public.profiles (
     created_at    timestamptz not null default now()
 );
 
-alter table public.profiles add column if not exists name          text not null default '';
-alter table public.profiles add column if not exists avatar        text default '';
+alter table public.profiles add column if not exists name          text;
+alter table public.profiles add column if not exists avatar        text;
+alter table public.profiles add column if not exists password      text;
 alter table public.profiles add column if not exists password_hash text;
-alter table public.profiles add column if not exists created_at    timestamptz not null default now();
+alter table public.profiles add column if not exists created_at    timestamptz default now();
 
-update public.profiles set nickname = lower(nickname) where nickname <> lower(nickname);
+update public.profiles set name = coalesce(nullif(name, ''), nickname) where name is null or name = '';
+update public.profiles set avatar = coalesce(avatar, '') where avatar is null;
+update public.profiles set created_at = now() where created_at is null;
 
-create unique index if not exists profiles_nickname_key on public.profiles (lower(nickname));
+-- Приводим ники к нижнему регистру и разводим совпадения: без этого шага
+-- уникальный индекс ниже падает, а вместе с ним откатывается весь скрипт.
+do $$
+declare
+    dup record;
+    other text;
+    n int;
+begin
+    update public.profiles
+       set nickname = lower(trim(both ' ' from nickname))
+     where nickname is distinct from lower(trim(both ' ' from nickname));
+
+    for dup in
+        select nickname, array_agg(id order by created_at nulls last, id) as ids
+          from public.profiles
+         group by nickname
+        having count(*) > 1
+    loop
+        n := 1;
+        -- первый владелец ника остаётся как есть, остальным добавляем номер
+        foreach other in array dup.ids[2:array_length(dup.ids, 1)]
+        loop
+            n := n + 1;
+            update public.profiles
+               set nickname = dup.nickname || n::text
+             where id = other;
+            raise notice 'Ник «%» повторялся: профиль % переименован в «%»',
+                dup.nickname, other, dup.nickname || n::text;
+        end loop;
+    end loop;
+exception when others then
+    raise notice 'Не удалось развести повторяющиеся ники: %', sqlerrm;
+end $$;
+
+do $$
+begin
+    create unique index if not exists profiles_nickname_key on public.profiles (nickname);
+exception when others then
+    raise notice 'Уникальный индекс по нику не создан: %', sqlerrm;
+end $$;
 
 -- ------------------------------------------------------------------ чаты ---
 create table if not exists public.chats (
@@ -37,7 +99,12 @@ create table if not exists public.chats (
     created_at timestamptz not null default now()
 );
 
-create index if not exists chats_members_idx on public.chats using gin (members);
+do $$
+begin
+    create index if not exists chats_members_idx on public.chats using gin (members);
+exception when others then
+    raise notice 'Индекс по участникам чата не создан: %', sqlerrm;
+end $$;
 
 -- ------------------------------------------------------------- сообщения ---
 create table if not exists public.messages (
@@ -50,11 +117,18 @@ create table if not exists public.messages (
     created_at timestamptz not null default now()
 );
 
-alter table public.messages add column if not exists reactions  jsonb not null default '{}'::jsonb;
-alter table public.messages add column if not exists created_at timestamptz not null default now();
+alter table public.messages add column if not exists reactions  jsonb default '{}'::jsonb;
+alter table public.messages add column if not exists created_at timestamptz default now();
 alter table public.messages add column if not exists user_name  text;
 
-create index if not exists messages_room_time_idx on public.messages (room_id, created_at desc);
+update public.messages set reactions = '{}'::jsonb where reactions is null;
+
+do $$
+begin
+    create index if not exists messages_room_time_idx on public.messages (room_id, created_at desc);
+exception when others then
+    raise notice 'Индекс по сообщениям не создан: %', sqlerrm;
+end $$;
 
 -- --------------------------------------------------- отметки о прочтении ---
 create table if not exists public.room_reads (
@@ -81,19 +155,22 @@ order by m.room_id, m.created_at desc;
 
 -- ============================================================================
 --  Функции входа и регистрации.
---  Пароли хранятся только в виде bcrypt-хеша; клиент никогда не читает их.
+--  Пароли хранятся только в виде bcrypt-хеша; клиент их не читает.
+--  search_path включает extensions — там в Supabase живёт pgcrypto.
 -- ============================================================================
 
 create or replace function public.wm_public_user(p public.profiles)
 returns json language sql immutable as $$
-    select json_build_object('id', p.id, 'nickname', p.nickname, 'name', p.name, 'avatar', coalesce(p.avatar, ''));
+    select json_build_object('id', p.id, 'nickname', p.nickname,
+                             'name', coalesce(nullif(p.name, ''), p.nickname),
+                             'avatar', coalesce(p.avatar, ''));
 $$;
 
 create or replace function public.wm_register(p_nickname text, p_password text, p_name text)
 returns json
 language plpgsql
 security definer
-set search_path = public
+set search_path = public, extensions, pg_temp
 as $$
 declare
     v_nick text := lower(trim(both ' ' from coalesce(p_nickname, '')));
@@ -105,20 +182,17 @@ begin
     if coalesce(length(p_password), 0) < 4 then
         return json_build_object('ok', false, 'error', 'weak_password');
     end if;
-    if exists (select 1 from public.profiles where lower(nickname) = v_nick) then
+    if exists (select 1 from public.profiles where nickname = v_nick) then
         return json_build_object('ok', false, 'error', 'nickname_taken');
     end if;
 
     insert into public.profiles (id, nickname, name, avatar, password_hash)
     values ('u' || floor(extract(epoch from now()) * 1000)::bigint || floor(random() * 1000)::int,
             v_nick,
-            nullif(trim(both ' ' from coalesce(p_name, '')), ''),
+            coalesce(nullif(trim(both ' ' from coalesce(p_name, '')), ''), v_nick),
             '',
             crypt(p_password, gen_salt('bf')))
     returning * into v_row;
-
-    update public.profiles set name = v_nick where id = v_row.id and (name is null or name = '');
-    select * into v_row from public.profiles where id = v_row.id;
 
     return json_build_object('ok', true, 'user', public.wm_public_user(v_row));
 end;
@@ -128,13 +202,13 @@ create or replace function public.wm_login(p_nickname text, p_password text)
 returns json
 language plpgsql
 security definer
-set search_path = public
+set search_path = public, extensions, pg_temp
 as $$
 declare
     v_row public.profiles;
 begin
     select * into v_row from public.profiles
-     where lower(nickname) = lower(trim(both ' ' from coalesce(p_nickname, '')))
+     where nickname = lower(trim(both ' ' from coalesce(p_nickname, '')))
      limit 1;
 
     if v_row.id is null then
@@ -164,7 +238,7 @@ create or replace function public.wm_set_password(p_nickname text, p_old_passwor
 returns json
 language plpgsql
 security definer
-set search_path = public
+set search_path = public, extensions, pg_temp
 as $$
 declare
     v_check json;
@@ -181,7 +255,7 @@ begin
 
     update public.profiles
        set password_hash = crypt(p_new_password, gen_salt('bf')), password = null
-     where lower(nickname) = lower(p_nickname)
+     where nickname = lower(trim(both ' ' from p_nickname))
     returning * into v_row;
 
     return json_build_object('ok', true, 'user', public.wm_public_user(v_row));
@@ -191,10 +265,10 @@ $$;
 -- ============================================================================
 --  Права доступа
 --
---  ВАЖНО: приложение обращается к базе публичным anon-ключом. Пароли закрыты
---  полностью (их отдаёт только функция входа), остальные данные доступны
---  любому, у кого есть ключ. Для приватной переписки переходите на
---  Supabase Auth + политики по auth.uid().
+--  ВАЖНО: приложение обращается к базе публичным ключом anon. Пароли закрыты
+--  полностью (их проверяет только функция входа), остальные данные доступны
+--  любому, у кого есть ключ. Для приватной переписки нужен переход на
+--  Supabase Auth с политиками по auth.uid().
 -- ============================================================================
 
 alter table public.profiles   enable row level security;
@@ -214,35 +288,55 @@ create policy wm_chats_all      on public.chats      for all    using (true) wit
 create policy wm_messages_all   on public.messages   for all    using (true) with check (true);
 create policy wm_reads_all      on public.room_reads for all    using (true) with check (true);
 
--- профили: читать можно только безопасные колонки, менять — имя и аватар
-revoke all on public.profiles from anon, authenticated;
-grant select (id, nickname, name, avatar, created_at) on public.profiles to anon, authenticated;
-grant update (name, avatar)                           on public.profiles to anon, authenticated;
-grant delete                                          on public.profiles to anon, authenticated;
-
-grant select, insert, update, delete on public.chats      to anon, authenticated;
-grant select, insert, update, delete on public.messages   to anon, authenticated;
-grant select, insert, update, delete on public.room_reads to anon, authenticated;
+grant usage on schema public to anon, authenticated;
+grant select, insert, update, delete on public.chats         to anon, authenticated;
+grant select, insert, update, delete on public.messages      to anon, authenticated;
+grant select, insert, update, delete on public.room_reads    to anon, authenticated;
 grant select                         on public.chat_previews to anon, authenticated;
 grant usage, select on all sequences in schema public to anon, authenticated;
 
-grant execute on function public.wm_register(text, text, text)          to anon, authenticated;
-grant execute on function public.wm_login(text, text)                   to anon, authenticated;
-grant execute on function public.wm_set_password(text, text, text)      to anon, authenticated;
+grant execute on function public.wm_register(text, text, text)     to anon, authenticated;
+grant execute on function public.wm_login(text, text)              to anon, authenticated;
+grant execute on function public.wm_set_password(text, text, text) to anon, authenticated;
 
--- Supabase Realtime (необязательно): мгновенная доставка вместо опроса
--- alter publication supabase_realtime add table public.messages;
+-- Доступ к profiles закрываем ТОЛЬКО если функции входа действительно созданы.
+-- Иначе приложение осталось бы и без функций, и без прямой записи — именно так
+-- выглядела ошибка «permission denied for table profiles».
+do $$
+declare
+    v_funcs int;
+begin
+    select count(*) into v_funcs
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public' and p.proname in ('wm_register', 'wm_login');
+
+    if v_funcs >= 2 then
+        execute 'revoke all on public.profiles from anon, authenticated';
+        execute 'grant select (id, nickname, name, avatar, created_at) on public.profiles to anon, authenticated';
+        execute 'grant update (name, avatar) on public.profiles to anon, authenticated';
+        execute 'grant delete on public.profiles to anon, authenticated';
+        raise notice 'Прямой доступ к паролям закрыт, вход работает через функции.';
+    else
+        execute 'grant select, insert, update, delete on public.profiles to anon, authenticated';
+        raise notice 'ВНИМАНИЕ: функции входа не созданы, оставлен прямой доступ к profiles.';
+    end if;
+end $$;
 
 -- ============================================================================
---  Обновление кеша REST API.
---
---  PostgREST держит список таблиц и функций в памяти и не всегда подхватывает
---  изменения сразу. Без этой команды приложение может некоторое время получать
---  404 на wm_register / wm_login и падать с ошибкой
---  «permission denied for table profiles».
---
---  Если ошибка всё же появилась — выполните эту строку отдельно и подождите
---  около минуты.
+--  Обновление кеша REST API. PostgREST держит список таблиц и функций в
+--  памяти; без этой команды новые функции какое-то время отдают 404, и
+--  приложение сообщает «База ещё не готова принимать регистрацию».
 -- ============================================================================
 
 notify pgrst, 'reload schema';
+
+-- ------------------------------------------------------------- отчёт ------
+select
+    (select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname = 'public' and p.proname in ('wm_register', 'wm_login', 'wm_set_password'))
+        as "функций создано (нужно 3)",
+    (select count(*) from public.profiles)  as "профилей в базе",
+    (select count(*) from public.messages)  as "сообщений в базе",
+    (select count(*) from information_schema.role_table_grants
+      where grantee = 'anon' and table_name = 'messages' and privilege_type = 'INSERT')
+        as "anon может писать сообщения";
