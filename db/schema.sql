@@ -90,14 +90,38 @@ exception when others then
     raise notice 'Уникальный индекс по нику не создан: %', sqlerrm;
 end $$;
 
--- ------------------------------------------------------------------ чаты ---
+-- ------------------------------------------------------- чаты и каналы ---
 create table if not exists public.chats (
     room_id    text primary key,
     name       text not null default '',
-    kind       text not null default 'dm',        -- 'dm' | 'group'
+    kind       text not null default 'dm',        -- 'dm' | 'group' | 'channel'
     members    text[] not null default '{}',
     created_at timestamptz not null default now()
 );
+
+-- публичные каналы: короткая ссылка, описание, владелец
+alter table public.chats add column if not exists slug        text;
+alter table public.chats add column if not exists about       text;
+alter table public.chats add column if not exists owner_id    text;
+alter table public.chats add column if not exists is_public   boolean default false;
+alter table public.chats add column if not exists subscribers integer default 0;
+
+update public.chats set is_public = false where is_public is null;
+update public.chats set subscribers = coalesce(array_length(members, 1), 0) where subscribers is null;
+
+do $$
+begin
+    create unique index if not exists chats_slug_key on public.chats (lower(slug)) where slug is not null;
+exception when others then
+    raise notice 'Уникальный индекс по ссылке канала не создан: %', sqlerrm;
+end $$;
+
+do $$
+begin
+    create index if not exists chats_public_idx on public.chats (is_public) where is_public;
+exception when others then
+    raise notice 'Индекс публичных каналов не создан: %', sqlerrm;
+end $$;
 
 do $$
 begin
@@ -263,6 +287,163 @@ end;
 $$;
 
 -- ============================================================================
+--  Публичные каналы: создание, подписка, поиск.
+--  Всё через функции — иначе одновременные подписки затирали бы друг друга
+--  (массив участников читается и записывается целиком).
+-- ============================================================================
+
+create or replace function public.wm_create_channel(p_owner text, p_title text, p_slug text, p_about text)
+returns json
+language plpgsql
+security definer
+set search_path = public, extensions, pg_temp
+as $$
+declare
+    v_slug text := lower(trim(both ' ' from coalesce(p_slug, '')));
+    v_room text;
+    v_row  public.chats;
+begin
+    if coalesce(length(trim(both ' ' from coalesce(p_title, ''))), 0) < 2 then
+        return json_build_object('ok', false, 'error', 'bad_title');
+    end if;
+    if v_slug !~ '^[a-z0-9_]{4,32}$' then
+        return json_build_object('ok', false, 'error', 'bad_slug');
+    end if;
+    if exists (select 1 from public.chats where lower(slug) = v_slug) then
+        return json_build_object('ok', false, 'error', 'slug_taken');
+    end if;
+
+    v_room := 'channel_' || v_slug;
+
+    insert into public.chats (room_id, name, kind, members, slug, about, owner_id, is_public, subscribers)
+    values (v_room, trim(both ' ' from p_title), 'channel', array[p_owner], v_slug,
+            nullif(trim(both ' ' from coalesce(p_about, '')), ''), p_owner, true, 1)
+    returning * into v_row;
+
+    return json_build_object('ok', true, 'chat', to_json(v_row));
+end;
+$$;
+
+create or replace function public.wm_join_chat(p_room text, p_user text)
+returns json
+language plpgsql
+security definer
+set search_path = public, extensions, pg_temp
+as $$
+declare
+    v_row public.chats;
+begin
+    update public.chats
+       set members = case when p_user = any(members) then members else array_append(members, p_user) end
+     where room_id = p_room
+    returning * into v_row;
+
+    if v_row.room_id is null then
+        return json_build_object('ok', false, 'error', 'not_found');
+    end if;
+
+    update public.chats set subscribers = coalesce(array_length(members, 1), 0)
+     where room_id = p_room returning * into v_row;
+
+    return json_build_object('ok', true, 'chat', to_json(v_row));
+end;
+$$;
+
+create or replace function public.wm_leave_chat(p_room text, p_user text)
+returns json
+language plpgsql
+security definer
+set search_path = public, extensions, pg_temp
+as $$
+declare
+    v_row public.chats;
+begin
+    update public.chats
+       set members = array_remove(members, p_user)
+     where room_id = p_room
+    returning * into v_row;
+
+    if v_row.room_id is null then
+        return json_build_object('ok', false, 'error', 'not_found');
+    end if;
+
+    update public.chats set subscribers = coalesce(array_length(members, 1), 0)
+     where room_id = p_room returning * into v_row;
+
+    return json_build_object('ok', true, 'chat', to_json(v_row));
+end;
+$$;
+
+/* Единый поиск: публичные каналы + пользователи, как в строке поиска Telegram. */
+create or replace function public.wm_search(p_query text, p_me text)
+returns json
+language plpgsql
+security definer
+set search_path = public, extensions, pg_temp
+as $$
+declare
+    v_q        text := lower(trim(both ' ' from coalesce(p_query, '')));
+    v_channels json;
+    v_users    json;
+begin
+    v_q := regexp_replace(v_q, '^@+', '');
+    if length(v_q) < 1 then
+        return json_build_object('channels', '[]'::json, 'users', '[]'::json);
+    end if;
+
+    select coalesce(json_agg(c), '[]'::json) into v_channels from (
+        select room_id, name, slug, about, subscribers, owner_id,
+               (p_me = any(members)) as joined
+          from public.chats
+         where is_public
+           and (lower(name) like '%' || v_q || '%' or lower(coalesce(slug, '')) like '%' || v_q || '%')
+         order by subscribers desc nulls last, name
+         limit 20
+    ) c;
+
+    select coalesce(json_agg(u), '[]'::json) into v_users from (
+        select id, nickname, name, avatar
+          from public.profiles
+         where id is distinct from p_me
+           and (lower(nickname) like '%' || v_q || '%' or lower(name) like '%' || v_q || '%')
+         order by nickname
+         limit 20
+    ) u;
+
+    return json_build_object('channels', v_channels, 'users', v_users);
+end;
+$$;
+
+/* В канале пишет только автор — проверка на стороне базы, а не только в UI. */
+create or replace function public.wm_guard_channel_post()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, extensions, pg_temp
+as $$
+declare
+    v_owner text;
+    v_kind  text;
+begin
+    select kind, owner_id into v_kind, v_owner from public.chats where room_id = new.room_id;
+    if v_kind = 'channel' and v_owner is not null and new.user_id is distinct from v_owner then
+        raise exception 'only the channel owner can post here' using errcode = '42501';
+    end if;
+    return new;
+end;
+$$;
+
+do $$
+begin
+    drop trigger if exists wm_messages_channel_guard on public.messages;
+    create trigger wm_messages_channel_guard
+        before insert on public.messages
+        for each row execute function public.wm_guard_channel_post();
+exception when others then
+    raise notice 'Защита канала от посторонних записей не установлена: %', sqlerrm;
+end $$;
+
+-- ============================================================================
 --  Права доступа
 --
 --  ВАЖНО: приложение обращается к базе публичным ключом anon. Пароли закрыты
@@ -295,9 +476,13 @@ grant select, insert, update, delete on public.room_reads    to anon, authentica
 grant select                         on public.chat_previews to anon, authenticated;
 grant usage, select on all sequences in schema public to anon, authenticated;
 
-grant execute on function public.wm_register(text, text, text)     to anon, authenticated;
-grant execute on function public.wm_login(text, text)              to anon, authenticated;
-grant execute on function public.wm_set_password(text, text, text) to anon, authenticated;
+grant execute on function public.wm_register(text, text, text)              to anon, authenticated;
+grant execute on function public.wm_login(text, text)                       to anon, authenticated;
+grant execute on function public.wm_set_password(text, text, text)          to anon, authenticated;
+grant execute on function public.wm_create_channel(text, text, text, text)  to anon, authenticated;
+grant execute on function public.wm_join_chat(text, text)                   to anon, authenticated;
+grant execute on function public.wm_leave_chat(text, text)                  to anon, authenticated;
+grant execute on function public.wm_search(text, text)                      to anon, authenticated;
 
 -- Доступ к profiles закрываем ТОЛЬКО если функции входа действительно созданы.
 -- Иначе приложение осталось бы и без функций, и без прямой записи — именно так
@@ -333,8 +518,10 @@ notify pgrst, 'reload schema';
 -- ------------------------------------------------------------- отчёт ------
 select
     (select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-      where n.nspname = 'public' and p.proname in ('wm_register', 'wm_login', 'wm_set_password'))
-        as "функций создано (нужно 3)",
+      where n.nspname = 'public' and p.proname in
+            ('wm_register', 'wm_login', 'wm_set_password',
+             'wm_create_channel', 'wm_join_chat', 'wm_leave_chat', 'wm_search'))
+        as "функций создано (нужно 7)",
     (select count(*) from public.profiles)  as "профилей в базе",
     (select count(*) from public.messages)  as "сообщений в базе",
     (select count(*) from information_schema.role_table_grants

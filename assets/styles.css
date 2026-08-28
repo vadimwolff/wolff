@@ -275,10 +275,11 @@ header b { font-size: 19px; letter-spacing: -0.4px; }
 
 .search-row input:focus { outline: 1px solid var(--accent); }
 
-.chat-list-container {
+.scroll-area {
     flex: 1;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
     padding-bottom: calc(var(--safe-bottom) + 20px);
 }
 
@@ -917,3 +918,208 @@ header b { font-size: 19px; letter-spacing: -0.4px; }
 @media (min-width: 720px) {
     .bubble { max-width: 60%; }
 }
+
+/* ==========================================================================
+   ДВИЖЕНИЕ И ПЕРЕХОДЫ
+   Все анимации построены только на transform и opacity — они выполняются на
+   видеокарте и не заставляют браузер пересчитывать разметку.
+   ========================================================================== */
+
+:root {
+    --spring: cubic-bezier(0.32, 0.72, 0, 1);
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.page.active.anim-right { animation: pageInRight 0.34s var(--spring); }
+.page.active.anim-up { animation: pageInUp 0.36s var(--spring); }
+
+@keyframes pageInRight {
+    from { transform: translateX(28px); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes pageInUp {
+    from { transform: translateY(24px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+}
+
+/* появление нового сообщения: короткий подъём со стороны отправителя */
+.bubble.appear { animation: bubbleAppear 0.28s var(--ease-out); }
+.bubble.out.appear { transform-origin: bottom right; }
+.bubble.in.appear { transform-origin: bottom left; }
+
+@keyframes bubbleAppear {
+    from { opacity: 0; transform: translateY(10px) scale(0.96); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* эмодзи в меню реакций выезжают по очереди */
+.reaction-picker .emoji-btn {
+    animation: emojiPop 0.26s var(--ease-out) backwards;
+    animation-delay: calc(var(--i, 0) * 22ms);
+}
+
+@keyframes emojiPop {
+    from { opacity: 0; transform: translateY(8px) scale(0.6); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.f-item, .settings-item, .action-item, .modal-item {
+    transition: background 0.18s ease, transform 0.12s var(--ease-out);
+}
+
+.f-item:active, .settings-item:active, .action-item:active, .modal-item:active {
+    transform: scale(0.988);
+}
+
+.hdr-btn, .input-bar button, .theme-card {
+    transition: transform 0.14s var(--ease-out), opacity 0.14s ease;
+}
+
+.hdr-btn:active, .input-bar button:active { transform: scale(0.88); opacity: 0.7; }
+.theme-card:active { transform: scale(0.94); }
+
+.auth-btn, .btn-primary, .btn-flat {
+    transition: transform 0.14s var(--ease-out), filter 0.2s ease, opacity 0.2s ease;
+}
+
+.auth-btn:active, .btn-primary:active, .btn-flat:active { transform: scale(0.97); filter: brightness(1.1); }
+
+.auth-btn.loading { position: relative; color: transparent; }
+
+.auth-btn.loading::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    margin: auto;
+    width: 20px;
+    height: 20px;
+    border: 2.5px solid rgba(255, 255, 255, 0.35);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.badge { animation: badgePop 0.3s var(--ease-out); }
+
+@keyframes badgePop {
+    from { transform: scale(0.4); opacity: 0; }
+    to { transform: scale(1); opacity: 1; }
+}
+
+/* Полное отключение движения: настройка в приложении или системная */
+body.no-motion *,
+body.no-motion *::before,
+body.no-motion *::after {
+    animation-duration: 0.001s !important;
+    animation-delay: 0s !important;
+    transition-duration: 0.001s !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.001s !important;
+        transition-duration: 0.001s !important;
+    }
+}
+
+/* ==========================================================================
+   СКЕЛЕТОНЫ ЗАГРУЗКИ
+   ========================================================================== */
+
+.skeleton-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 6px 0;
+}
+
+.skeleton-bubble {
+    height: 42px;
+    border-radius: 18px;
+    background: linear-gradient(100deg,
+        rgba(128, 128, 128, 0.10) 30%,
+        rgba(128, 128, 128, 0.20) 50%,
+        rgba(128, 128, 128, 0.10) 70%);
+    background-size: 220% 100%;
+    animation: shimmer 1.3s linear infinite;
+}
+
+.skeleton-bubble.in { align-self: flex-start; border-bottom-left-radius: 5px; }
+.skeleton-bubble.out { align-self: flex-end; border-bottom-right-radius: 5px; }
+
+@keyframes shimmer {
+    from { background-position: 140% 0; }
+    to { background-position: -40% 0; }
+}
+
+/* ==========================================================================
+   ГЛОБАЛЬНЫЙ ПОИСК И КАНАЛЫ
+   ========================================================================== */
+
+.section-title {
+    padding: 16px 16px 8px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+}
+
+.section-title.top {
+    border-top: 0.5px solid var(--border);
+    background: linear-gradient(var(--hover), transparent);
+}
+
+.row-action {
+    flex: 0 0 auto;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--accent);
+    padding: 6px 12px;
+    border-radius: 12px;
+    background: var(--hover);
+}
+
+#global-results .f-item { animation: rowIn 0.3s var(--ease-out) backwards; }
+
+@keyframes rowIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.empty-state.small-state { height: auto; padding: 30px 20px; }
+
+.channel-bar {
+    flex: 0 0 auto;
+    padding: 14px 16px calc(var(--safe-bottom) + 14px);
+    background: var(--card);
+    border-top: 0.5px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    font-size: 14px;
+    color: var(--text-muted);
+    text-align: center;
+}
+
+.channel-bar[hidden] { display: none; }
+.input-bar[hidden] { display: none; }
+.channel-bar .btn-primary { flex: 0 0 auto; padding: 12px 28px; }
+
+.lock { font-size: 13px; }
+
+.bubble .locked {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    opacity: 0.75;
+    font-style: italic;
+}
+
+.status-failed .check-path { stroke: var(--danger); opacity: 1; }
+
+.popup-menu .action-item[hidden] { display: none; }

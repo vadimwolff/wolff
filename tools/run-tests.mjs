@@ -36,6 +36,7 @@ await new Promise((r) => setTimeout(r, 1500));
 let code = 0;
 code += await run('tools/e2e.mjs', { WM_BASE: 'http://localhost:8123' });
 code += await run('tools/e2e-legacy.mjs', { WM_BASE: 'http://localhost:8124' });
+code += await run('tools/e2e-v50.mjs', { WM_BASE: 'http://localhost:8123' });
 code += await run('tools/e2e-schema.mjs', {
     WM_BASE_WARMUP: 'http://localhost:8125',
     WM_BASE_ALWAYS: 'http://localhost:8126'

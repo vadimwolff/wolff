@@ -44,13 +44,43 @@ const hash = (s) => 'bcrypt$' + crypto.createHash('sha256').update(String(s)).di
 
 /* ------------------------------------------------------------- фильтрация */
 
+/* Делит "a.ilike.*x*,b.eq.1" по запятым верхнего уровня, не трогая скобки. */
+function splitTop(text) {
+    const out = [];
+    let depth = 0, buf = '';
+    for (const ch of text) {
+        if (ch === '(' || ch === '{') depth++;
+        if (ch === ')' || ch === '}') depth--;
+        if (ch === ',' && depth === 0) { out.push(buf); buf = ''; continue; }
+        buf += ch;
+    }
+    if (buf) out.push(buf);
+    return out;
+}
+
 function matchFilter(row, column, expr) {
+    if (column === 'or') {
+        // or=(name.ilike.*x*,slug.ilike.*x*)
+        return splitTop(expr.replace(/^\(|\)$/g, '')).some((part) => {
+            const dot = part.indexOf('.');
+            return matchFilter(row, part.slice(0, dot), part.slice(dot + 1));
+        });
+    }
+
     const dot = expr.indexOf('.');
     const op = expr.slice(0, dot);
     const raw = expr.slice(dot + 1);
     const value = row[column];
 
     switch (op) {
+        case 'is': {
+            if (raw === 'null') return value === null || value === undefined;
+            return String(!!value) === raw;
+        }
+        case 'ilike': {
+            const needle = raw.replace(/[%*]/g, '').toLowerCase();
+            return String(value ?? '').toLowerCase().includes(needle);
+        }
         case 'eq': return String(value) === raw;
         case 'neq': return String(value) !== raw;
         case 'gt': return String(value) > raw;
@@ -157,6 +187,65 @@ const rpcs = {
         return { ok: false, error: 'bad_password' };
     },
 
+    wm_create_channel({ p_owner, p_title, p_slug, p_about }) {
+        const slug = String(p_slug || '').trim().toLowerCase();
+        if (String(p_title || '').trim().length < 2) return { ok: false, error: 'bad_title' };
+        if (!/^[a-z0-9_]{4,32}$/.test(slug)) return { ok: false, error: 'bad_slug' };
+        if (db.chats.some((c) => String(c.slug || '').toLowerCase() === slug)) {
+            return { ok: false, error: 'slug_taken' };
+        }
+        const chat = {
+            room_id: 'channel_' + slug,
+            name: String(p_title).trim(),
+            kind: 'channel',
+            members: [p_owner],
+            slug,
+            about: String(p_about || '').trim() || null,
+            owner_id: p_owner,
+            is_public: true,
+            subscribers: 1,
+            created_at: new Date().toISOString()
+        };
+        db.chats.push(chat);
+        return { ok: true, chat };
+    },
+
+    wm_join_chat({ p_room, p_user }) {
+        const chat = db.chats.find((c) => c.room_id === p_room);
+        if (!chat) return { ok: false, error: 'not_found' };
+        if (!chat.members.includes(p_user)) chat.members.push(p_user);
+        chat.subscribers = chat.members.length;
+        return { ok: true, chat };
+    },
+
+    wm_leave_chat({ p_room, p_user }) {
+        const chat = db.chats.find((c) => c.room_id === p_room);
+        if (!chat) return { ok: false, error: 'not_found' };
+        chat.members = chat.members.filter((m) => m !== p_user);
+        chat.subscribers = chat.members.length;
+        return { ok: true, chat };
+    },
+
+    wm_search({ p_query, p_me }) {
+        const term = String(p_query || '').trim().toLowerCase().replace(/^@+/, '');
+        if (!term) return { channels: [], users: [] };
+        const channels = db.chats
+            .filter((c) => c.is_public && (String(c.name || '').toLowerCase().includes(term) ||
+                String(c.slug || '').toLowerCase().includes(term)))
+            .slice(0, 20)
+            .map((c) => ({
+                room_id: c.room_id, name: c.name, slug: c.slug, about: c.about,
+                subscribers: c.subscribers, owner_id: c.owner_id,
+                joined: (c.members || []).includes(p_me)
+            }));
+        const users = db.profiles
+            .filter((p) => p.id !== p_me && (p.nickname.includes(term) ||
+                String(p.name || '').toLowerCase().includes(term)))
+            .slice(0, 20)
+            .map((p) => ({ id: p.id, nickname: p.nickname, name: p.name, avatar: p.avatar }));
+        return { channels, users };
+    },
+
     wm_set_password({ p_nickname, p_old_password, p_new_password }) {
         if (String(p_new_password || '').length < 4) return { ok: false, error: 'weak_password' };
         const check = rpcs.wm_login({ p_nickname, p_password: p_old_password });
@@ -254,6 +343,18 @@ function handleApi(req, res, rest, body) {
 
     if (req.method === 'POST') {
         const rows = Array.isArray(body) ? body : [body];
+
+        // как триггер в базе: в канал пишет только его владелец
+        if (name === 'messages') {
+            const bad = rows.find((row) => {
+                const chat = db.chats.find((c) => c.room_id === row.room_id);
+                return chat && chat.kind === 'channel' && chat.owner_id && chat.owner_id !== row.user_id;
+            });
+            if (bad) {
+                return json(res, 403, { code: '42501', message: 'only the channel owner can post here' });
+            }
+        }
+
         const saved = rows.map((row) => {
             const rec = { ...row };
             if (name === 'messages') {

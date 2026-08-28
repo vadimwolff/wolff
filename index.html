@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#000000">
-<meta name="description" content="WolffMsg — лёгкий веб-мессенджер">
+<meta name="description" content="WolffMsg — лёгкий веб-мессенджер с публичными каналами и шифрованием">
 <title>WolffMsg</title>
 <link rel="manifest" href="assets/manifest.webmanifest">
 <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
@@ -50,7 +50,8 @@
     </header>
 
     <div class="search-row">
-        <input type="search" id="chat-search" placeholder="Поиск по чатам" autocomplete="off">
+        <input type="search" id="chat-search" placeholder="Поиск чатов, каналов и людей"
+               autocomplete="off" autocapitalize="none">
     </div>
 
     <div id="context-bar">
@@ -60,7 +61,10 @@
         <span id="ctx-delete" class="danger">🗑 Удалить</span>
     </div>
 
-    <div id="chat-list" class="chat-list-container"></div>
+    <div class="scroll-area">
+        <div id="chat-list"></div>
+        <div id="global-results"></div>
+    </div>
 </div>
 
 <!-- ================= ЧАТ ================= -->
@@ -68,7 +72,7 @@
     <header>
         <span class="hdr-btn accent" id="btn-back">‹ Назад</span>
         <div class="chat-head">
-            <b id="chat-title">Чат</b>
+            <b id="chat-title">Чат <span id="chat-lock" class="lock" hidden>🔒</span></b>
             <small id="chat-subtitle"></small>
         </div>
         <span class="hdr-btn" id="btn-chat-menu" title="Меню чата">⋮</span>
@@ -76,18 +80,25 @@
 
     <div id="chat-actions-menu" class="popup-menu" hidden>
         <div class="action-item" id="act-invite"><span>➕</span> Добавить участника</div>
+        <div class="action-item" id="act-crypto"><span>🔒</span> Шифрование</div>
         <div class="action-item" id="act-mute"><span>🔔</span> Уведомления</div>
         <div class="action-item" id="act-clear"><span>🧹</span> Очистить историю</div>
+        <div class="action-item" id="act-leave"><span>🚪</span> Отписаться</div>
         <div class="action-item danger" id="act-delete"><span>🗑️</span> Удалить чат</div>
     </div>
 
     <div id="msg-list" class="msg-container"></div>
 
-    <div class="input-bar">
+    <div class="input-bar" id="input-bar">
         <button type="button" id="btn-attach" title="Прикрепить фото">📎</button>
         <input type="file" id="m-file" accept="image/*" hidden>
         <textarea id="m-input" rows="1" placeholder="Сообщение..."></textarea>
         <button type="button" id="btn-send" class="send" title="Отправить">➤</button>
+    </div>
+
+    <div class="channel-bar" id="channel-bar" hidden>
+        <span id="channel-note">Только автор канала может публиковать записи</span>
+        <button type="button" id="btn-join" class="btn-primary" hidden>Подписаться</button>
     </div>
 </div>
 
@@ -118,31 +129,67 @@
             <div class="settings-item" id="set-name"><i>👤</i> Изменить имя</div>
             <div class="settings-item" id="set-pass"><i>🔑</i> Изменить пароль</div>
             <div class="settings-item" id="set-conn"><i>🌐</i> Соединение <span id="conn-state" class="pill">…</span></div>
+            <div class="settings-item" id="set-motion"><i>✨</i> Анимации <span id="motion-state" class="pill">вкл</span></div>
             <div class="settings-item" id="set-cache"><i>🧹</i> Очистить локальные данные</div>
             <div class="settings-item danger" id="set-logout"><i>🚪</i> Выйти из системы</div>
             <div class="settings-item danger" id="set-delete"><i>🗑️</i> Удалить аккаунт</div>
         </div>
 
-        <p class="version">WolffMsg v49 · <span id="build-host"></span></p>
+        <p class="version">WolffMsg v50 · <span id="build-host"></span></p>
     </div>
 </div>
 
 <!-- ================= МОДАЛКИ ================= -->
 <div id="plus-menu" class="modal-overlay">
     <div class="modal-menu">
-        <div class="modal-item" id="plus-user">👤 Добавить пользователя</div>
+        <div class="modal-item" id="plus-user">👤 Написать пользователю</div>
         <div class="modal-item" id="plus-group">👨‍👩‍👧 Создать группу</div>
+        <div class="modal-item" id="plus-channel">📣 Создать канал</div>
         <div class="modal-item cancel" id="plus-cancel">Отмена</div>
+    </div>
+</div>
+
+<div id="channel-modal" class="modal-overlay">
+    <div class="modal-sheet">
+        <h3>Новый канал</h3>
+        <p class="muted small">Канал виден всем в поиске. Публиковать записи может только автор.</p>
+        <input type="text" id="ch-title" class="auth-input" placeholder="Название канала" maxlength="60">
+        <input type="text" id="ch-slug" class="auth-input" placeholder="ссылка: латиница, цифры, _"
+               autocapitalize="none" spellcheck="false" maxlength="32">
+        <input type="text" id="ch-about" class="auth-input" placeholder="Описание (необязательно)" maxlength="140">
+        <div class="sheet-row">
+            <button type="button" class="btn-flat" id="ch-cancel">Отмена</button>
+            <button type="button" class="btn-primary" id="ch-create">Создать</button>
+        </div>
+        <p class="auth-hint" id="ch-status"></p>
+    </div>
+</div>
+
+<div id="crypto-modal" class="modal-overlay">
+    <div class="modal-sheet">
+        <h3>Шифрование чата</h3>
+        <p class="muted small">Придумайте секретный код и сообщите его собеседнику любым другим
+            способом. Сообщения будут шифроваться на устройстве — на сервере остаётся только
+            нечитаемый набор символов. Без кода переписку не прочитает никто, включая владельца базы.</p>
+        <input type="password" id="crypto-code" class="auth-input" placeholder="секретный код чата"
+               autocomplete="off" autocapitalize="none">
+        <div class="sheet-row">
+            <button type="button" class="btn-flat" id="crypto-off">Выключить</button>
+            <button type="button" class="btn-primary" id="crypto-save">Включить</button>
+        </div>
+        <div class="modal-item cancel" id="crypto-close">Закрыть</div>
     </div>
 </div>
 
 <div id="conn-modal" class="modal-overlay">
     <div class="modal-sheet">
         <h3>Соединение с сервером</h3>
-        <p class="muted small">Приложение само выбирает первый доступный адрес. Если в вашей сети
-            все адреса заблокированы — вставьте ссылку на свой прокси.</p>
+        <p class="muted small">Приложение само выбирает первый доступный адрес и переключается,
+            когда сеть меняется — например при включении VPN. Если все адреса недоступны,
+            вставьте ссылку на свой прокси.</p>
         <div id="conn-list" class="conn-list"></div>
-        <input type="url" id="conn-custom" class="auth-input" placeholder="https://ваш-прокси/rest/v1" autocapitalize="none" spellcheck="false">
+        <input type="url" id="conn-custom" class="auth-input" placeholder="https://ваш-прокси/rest/v1"
+               autocapitalize="none" spellcheck="false">
         <div class="sheet-row">
             <button type="button" class="btn-flat" id="conn-reset">Сбросить</button>
             <button type="button" class="btn-primary" id="conn-save">Проверить и сохранить</button>
@@ -177,6 +224,7 @@
 <div id="lightbox" class="lightbox"><img id="lightbox-img" alt=""></div>
 
 <script src="assets/config.js"></script>
+<script src="assets/crypto.js"></script>
 <script src="assets/app.js"></script>
 </body>
 </html>
