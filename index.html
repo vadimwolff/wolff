@@ -71,7 +71,7 @@
 <div id="page-chat" class="page">
     <header>
         <span class="hdr-btn accent" id="btn-back">‹ Назад</span>
-        <div class="chat-head">
+        <div class="chat-head" id="chat-head">
             <b id="chat-title">Чат <span id="chat-lock" class="lock" hidden>🔒</span></b>
             <small id="chat-subtitle"></small>
         </div>
@@ -88,6 +88,19 @@
     </div>
 
     <div id="msg-list" class="msg-container"></div>
+
+    <button type="button" id="scroll-pill" class="scroll-pill" hidden>
+        <span class="arrow">↓</span><span id="scroll-count" class="pill-count"></span>
+    </button>
+
+    <div id="reply-bar" class="reply-bar" hidden>
+        <div class="reply-line"></div>
+        <div class="reply-body">
+            <b id="reply-name"></b>
+            <small id="reply-preview"></small>
+        </div>
+        <span id="reply-cancel" class="reply-cancel">✕</span>
+    </div>
 
     <div class="input-bar" id="input-bar">
         <button type="button" id="btn-attach" title="Прикрепить фото">📎</button>
@@ -130,12 +143,13 @@
             <div class="settings-item" id="set-pass"><i>🔑</i> Изменить пароль</div>
             <div class="settings-item" id="set-conn"><i>🌐</i> Соединение <span id="conn-state" class="pill">…</span></div>
             <div class="settings-item" id="set-motion"><i>✨</i> Анимации <span id="motion-state" class="pill">вкл</span></div>
+            <div class="settings-item" id="set-profile"><i>🪪</i> Мой профиль</div>
             <div class="settings-item" id="set-cache"><i>🧹</i> Очистить локальные данные</div>
             <div class="settings-item danger" id="set-logout"><i>🚪</i> Выйти из системы</div>
             <div class="settings-item danger" id="set-delete"><i>🗑️</i> Удалить аккаунт</div>
         </div>
 
-        <p class="version">WolffMsg v50 · <span id="build-host"></span></p>
+        <p class="version">WolffMsg global</p>
     </div>
 </div>
 
@@ -218,6 +232,27 @@
             <button type="button" class="btn-flat" id="confirm-cancel">Отмена</button>
             <button type="button" class="btn-primary danger-btn" id="confirm-ok">Удалить</button>
         </div>
+    </div>
+</div>
+
+<div id="profile-modal" class="modal-overlay">
+    <div class="modal-sheet profile-sheet">
+        <img id="pf-av" class="pf-av" alt="">
+        <h3 id="pf-name">Имя</h3>
+        <p id="pf-nick" class="muted small"></p>
+        <p id="pf-extra" class="muted small"></p>
+        <div class="sheet-row">
+            <button type="button" class="btn-flat" id="pf-close">Закрыть</button>
+            <button type="button" class="btn-primary" id="pf-write">Написать</button>
+        </div>
+    </div>
+</div>
+
+<div id="reactions-modal" class="modal-overlay">
+    <div class="modal-sheet">
+        <h3>Реакции</h3>
+        <div id="reactions-list" class="reactions-list"></div>
+        <div class="modal-item cancel" id="reactions-close">Закрыть</div>
     </div>
 </div>
 

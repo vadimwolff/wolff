@@ -31,6 +31,14 @@ const LEGACY = process.env.WM_LEGACY === '1';
 const DENY = process.env.WM_DENY || '';
 let rpcCalls = 0;
 
+/* WM_OLDCHATS=1 — база предыдущей версии: функций каналов нет, а в таблицах
+   отсутствуют колонки каналов и ответов. PostgREST на такие поля отвечает 400. */
+const OLD_CHATS = process.env.WM_OLDCHATS === '1';
+const OLD_COLUMNS = {
+    chats: ['room_id', 'name', 'kind', 'members', 'created_at'],
+    messages: ['id', 'room_id', 'user_id', 'user_name', 'text', 'reactions', 'created_at']
+};
+
 const db = {
     profiles: [],
     chats: [],
@@ -323,6 +331,28 @@ function handleApi(req, res, rest, body) {
             (req.method === 'POST' || req.method === 'DELETE' || params.has('password'));
         if (denied) {
             return json(res, 403, { code: '42501', message: 'permission denied for table profiles' });
+        }
+    }
+
+    if (OLD_CHATS) {
+        const newRpcs = ['wm_create_channel', 'wm_join_chat', 'wm_leave_chat', 'wm_search'];
+        if (parts[0] === 'rpc' && newRpcs.includes(parts[1])) {
+            return json(res, 404, { code: 'PGRST202', message: 'function not found' });
+        }
+        const allowed = OLD_COLUMNS[parts[0]];
+        if (allowed) {
+            const select = params.get('select');
+            const used = []
+                .concat(select && select !== '*' ? select.split(',').map((c) => c.trim()) : [])
+                .concat(body && !Array.isArray(body) ? Object.keys(body) : [])
+                .concat([...params.keys()].filter((k) => !['select', 'order', 'limit', 'offset', 'or'].includes(k)));
+            const bad = used.find((c) => c && !allowed.includes(c));
+            if (bad) {
+                return json(res, 400, {
+                    code: 'PGRST204',
+                    message: "Could not find the '" + bad + "' column of '" + parts[0] + "' in the schema cache"
+                });
+            }
         }
     }
 

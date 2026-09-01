@@ -31,13 +31,16 @@
     };
 
     var THEMES = [
-        { id: 'dark', label: 'Тёмная', bg: '#1c1c1e', a: '#0a84ff', b: 'rgba(255,255,255,.18)' },
-        { id: 'light', label: 'Светлая', bg: '#ffffff', a: '#007aff', b: '#e5e5ea' },
-        { id: 'ocean', label: 'Океан', bg: '#1a2a33', a: '#5ba4cf', b: '#2d3e4d' },
-        { id: 'forest', label: 'Лес', bg: '#1b241b', a: '#7ea37e', b: '#2c362c' },
-        { id: 'lavender', label: 'Лаванда', bg: '#2d1b4d', a: '#8b5cf6', b: '#4c337a' },
-        { id: 'emerald', label: 'Изумруд', bg: '#061712', a: '#10b981', b: 'rgba(16,185,129,.25)' }
+        { id: 'dark', label: 'Графит', bg: '#0e0e10', a: '#434b7d', b: '#1e1e23' },
+        { id: 'light', label: 'Снег', bg: '#f4f5f7', a: '#d5dff9', b: '#ffffff' },
+        { id: 'fog', label: 'Туман', bg: '#ecedf0', a: '#d1d9e2', b: '#ffffff' },
+        { id: 'sand', label: 'Песок', bg: '#f6f2ea', a: '#e7d6ba', b: '#fffdf8' },
+        { id: 'dusk', label: 'Сумерки', bg: '#0f1319', a: '#2c496d', b: '#1c232d' },
+        { id: 'moss', label: 'Мох', bg: '#0f1310', a: '#324a36', b: '#1b221c' }
     ];
+
+    /* Прежние названия тем — на ближайшие по настроению из нового набора. */
+    var THEME_ALIASES = { ocean: 'dusk', forest: 'moss', lavender: 'dusk', emerald: 'moss', purple: 'dusk' };
 
     var EMOJIS = ['👍', '❤️', '🔥', '😂', '😮', '😢'];
     var LOCKED_LABEL = '🔒 Зашифровано — введите код чата';
@@ -56,6 +59,10 @@
         selectedRoom: null,
         pickerOpen: null,
         pendingRender: false,
+        replyTo: null,          // сообщение, на которое отвечаем
+        unreadFrom: null,       // граница «непрочитанные» на момент открытия чата
+        newCount: 0,            // сколько новых сообщений пришло, пока читали историю
+        atBottom: true,
         registerMode: false,
         page: 'auth',
         search: '',
@@ -69,7 +76,8 @@
         firstChatPaint: true,
         serverChats: true,
         hasPreviews: true,
-        hasSearch: true
+        hasSearch: true,
+        hasReplies: true
     };
 
     /* --------------------------------------------------------------- утилиты */
@@ -393,24 +401,40 @@
         try { localStorage.removeItem(LS.cacheMsgs + room); } catch (e) { /* no-op */ }
     }
 
-    /* Расшифровывает тело сообщения один раз и запоминает результат в объекте. */
+    /* Расшифровывает тело сообщения и цитату один раз, результат кэшируется. */
     function decodeMessage(m, key) {
         if (m.body !== undefined) return Promise.resolve(m);
-        if (!CR || !CR.isEncrypted(m.text)) {
-            m.body = m.text;
-            m.encrypted = false;
-            return Promise.resolve(m);
+
+        var quote = Promise.resolve();
+        if (m.reply_preview) {
+            if (!CR || !CR.isEncrypted(m.reply_preview)) {
+                m.replyBody = m.reply_preview;
+            } else if (!key) {
+                m.replyBody = '🔒 …';
+            } else {
+                quote = CR.decrypt(key, m.reply_preview)
+                    .then(function (plain) { m.replyBody = plain; })
+                    .catch(function () { m.replyBody = '🔒 …'; });
+            }
         }
-        m.encrypted = true;
-        if (!key) { m.body = LOCKED_LABEL; m.locked = true; return Promise.resolve(m); }
-        return CR.decrypt(key, m.text).then(function (plain) {
-            m.body = plain;
-            m.locked = false;
-            return m;
-        }).catch(function () {
-            m.body = LOCKED_LABEL;
-            m.locked = true;
-            return m;
+
+        return quote.then(function () {
+            if (!CR || !CR.isEncrypted(m.text)) {
+                m.body = m.text;
+                m.encrypted = false;
+                return m;
+            }
+            m.encrypted = true;
+            if (!key) { m.body = LOCKED_LABEL; m.locked = true; return m; }
+            return CR.decrypt(key, m.text).then(function (plain) {
+                m.body = plain;
+                m.locked = false;
+                return m;
+            }).catch(function () {
+                m.body = LOCKED_LABEL;
+                m.locked = true;
+                return m;
+            });
         });
     }
 
@@ -642,6 +666,7 @@
     }
 
     function setTheme(id) {
+        if (THEME_ALIASES[id]) id = THEME_ALIASES[id];
         if (!THEMES.some(function (t) { return t.id === id; })) id = 'dark';
         document.body.className = 'theme-' + id;
         localStorage.setItem(LS.theme, id);
@@ -1199,15 +1224,27 @@
             })
             .catch(function (err) {
                 if (!missingRelation(err)) throw err;
+                // Функции нет — создаём канал напрямую. Если в таблице ещё нет
+                // колонок каналов, повторяем запрос с базовым набором полей.
                 var room = 'channel_' + slug;
-                return request('/chats', {
-                    method: 'POST',
-                    headers: { Prefer: 'return=representation' },
-                    body: {
-                        room_id: room, name: title, kind: 'channel', members: [state.me.id],
-                        slug: slug, about: about, owner_id: state.me.id, is_public: true, subscribers: 1
-                    }
-                }).then(function (rows) { return (rows && rows[0]) || { room_id: room }; });
+                var full = {
+                    room_id: room, name: title, kind: 'channel', members: [state.me.id],
+                    slug: slug, about: about, owner_id: state.me.id, is_public: true, subscribers: 1
+                };
+                var insert = function (body) {
+                    return request('/chats', {
+                        method: 'POST',
+                        headers: { Prefer: 'return=representation' },
+                        body: body
+                    });
+                };
+                return insert(full)
+                    .catch(function (columnErr) {
+                        if (columnErr.status !== 400) throw columnErr;
+                        toast('В базе нет колонок каналов — выполните db/schema.sql');
+                        return insert({ room_id: room, name: title, kind: 'channel', members: [state.me.id] });
+                    })
+                    .then(function (rows) { return (rows && rows[0]) || { room_id: room }; });
             })
             .then(function (chat) {
                 $('channel-modal').classList.remove('show');
@@ -1215,7 +1252,9 @@
                 return syncChats().then(function () { openChat(chat.room_id); });
             })
             .catch(function (err) {
-                $('ch-status').textContent = err.message || 'Не удалось создать канал';
+                console.error('Создание канала:', err);
+                $('ch-status').textContent = (err.message || 'Не удалось создать канал') +
+                    (err.status ? ' (код ' + err.status + ')' : '');
             });
     }
 
@@ -1409,6 +1448,10 @@
         state.pickerOpen = null;
         state.pendingRender = false;
         state.firstChatPaint = true;
+        state.newCount = 0;
+        state.unreadFrom = myLastRead(room);
+        clearReply();
+        updateScrollPill();
 
         $('msg-list').innerHTML = skeletonHtml();
         updateChatHeader();
@@ -1491,15 +1534,25 @@
         var room = state.activeRoom;
         if (!room) return Promise.resolve();
 
-        var fields = 'id,room_id,user_id,user_name,text,reactions,created_at';
+        var base = 'id,room_id,user_id,user_name,text,reactions,created_at';
+        var fields = state.hasReplies ? base + ',reply_to,reply_name,reply_preview' : base;
         var newerThan = initial ? null : lastCreatedAt();
 
-        var loadMsgs = newerThan
-            ? request('/messages?room_id=eq.' + q(room) + '&created_at=gt.' + q(newerThan) +
-                '&select=' + fields + '&order=created_at.asc&limit=100')
-            : request('/messages?room_id=eq.' + q(room) +
-                '&select=' + fields + '&order=created_at.desc&limit=100')
-                .then(function (rows) { return (rows || []).slice().reverse(); });
+        function fetchRange(cols) {
+            return newerThan
+                ? request('/messages?room_id=eq.' + q(room) + '&created_at=gt.' + q(newerThan) +
+                    '&select=' + cols + '&order=created_at.asc&limit=100')
+                : request('/messages?room_id=eq.' + q(room) +
+                    '&select=' + cols + '&order=created_at.desc&limit=100')
+                    .then(function (rows) { return (rows || []).slice().reverse(); });
+        }
+
+        var loadMsgs = fetchRange(fields).catch(function (err) {
+            // в базе прошлой версии колонок ответа нет — читаем без них
+            if (err.status !== 400 || !state.hasReplies) throw err;
+            state.hasReplies = false;
+            return fetchRange(base);
+        });
 
         return loadMsgs.then(function (rows) {
             if (state.activeRoom !== room) return null;
@@ -1526,7 +1579,7 @@
                         if (m) m.reactions = l.reactions;
                     });
                     state.msgs = state.msgs.filter(function (m) { return m.pending || alive[m.id]; });
-                    return fresh.length;
+                    return fresh;
                 });
         }).then(function (added) {
             if (state.activeRoom !== room) return;
@@ -1534,9 +1587,12 @@
                 return loadReads(room);
             }).then(function () {
                 if (state.activeRoom !== room) return;
-                renderMessages(initial || added > 0);
+                var incoming = 0;
+                (added || []).forEach(function (m) { if (m.user_id !== state.me.id) incoming++; });
+                if (incoming && !isAtBottom()) state.newCount += incoming;
+                renderMessages(!!initial);
                 cacheMessages(room);
-                if (initial || added > 0) markRead(room);
+                if (initial || (added && added.length)) markRead(room);
             });
         }).catch(function (err) {
             if (state.activeRoom !== room) return;
@@ -1610,8 +1666,10 @@
             statusClass(m),
             m.pending ? 1 : 0,
             m.failed ? 1 : 0,
-            m.user_name || ''
-        ].join('');
+            m.user_name || '',
+            m.reply_to || '',
+            m.replyBody === undefined ? (m.reply_preview || '') : m.replyBody
+        ].join('\u0001');
     }
 
     function bubbleInner(m, isGroup) {
@@ -1641,9 +1699,18 @@
         }
 
         var author = (!out && isGroup)
-            ? '<span class="author">' + esc(m.user_name || 'Пользователь') + '</span>' : '';
+            ? '<span class="author" data-author="' + esc(m.user_id || '') + '">' +
+              esc(m.user_name || 'Пользователь') + '</span>' : '';
 
-        return author + '<div class="text">' + content + '</div>' + rHtml +
+        var quote = '';
+        if (m.reply_to) {
+            quote = '<div class="quote" data-goto="' + esc(m.reply_to) + '"><i></i>' +
+                '<div class="q-body"><b>' + esc(m.reply_name || 'Сообщение') + '</b>' +
+                '<small>' + esc(m.replyBody === undefined ? (m.reply_preview || '') : m.replyBody) +
+                '</small></div></div>';
+        }
+
+        return author + quote + '<div class="text">' + content + '</div>' + rHtml +
             '<div class="bubble-meta">' + esc(fmtTime(m.created_at)) +
             (out ? '<span class="status-icon ' + statusClass(m) + '">' + CHECK_SVG + '</span>' : '') +
             '</div>';
@@ -1687,17 +1754,23 @@
         var skeleton = box.querySelector('.skeleton-wrap, .empty-state');
         if (skeleton) box.innerHTML = '';
 
-        var atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 140;
+        var wasAtBottom = isAtBottom();
         var isGroup = state.activeChat &&
             (state.activeChat.kind === 'group' || state.activeChat.kind === 'channel');
 
         var desired = [];
         var lastDay = '';
+        var unreadShown = false;
         state.msgs.forEach(function (m) {
             var day = fmtDay(m.created_at);
             if (day && day !== lastDay) {
                 desired.push({ key: 'sep:' + day, day: day });
                 lastDay = day;
+            }
+            if (!unreadShown && state.unreadFrom && m.user_id !== state.me.id &&
+                String(m.created_at) > state.unreadFrom) {
+                desired.push({ key: 'unread', unread: true });
+                unreadShown = true;
             }
             desired.push({ key: 'msg:' + messageKey(m), m: m });
         });
@@ -1718,6 +1791,11 @@
             } else if (item.m) {
                 node = createBubble(item.m, isGroup);
                 if (animate) node.classList.add('appear');
+            } else if (item.unread) {
+                node = document.createElement('div');
+                node.className = 'unread-sep';
+                node.setAttribute('data-key', item.key);
+                node.textContent = 'Непрочитанные сообщения';
             } else {
                 node = document.createElement('div');
                 node.className = 'day-sep';
@@ -1736,7 +1814,36 @@
         }
 
         state.firstChatPaint = false;
-        if (scrollToEnd || atBottom) box.scrollTop = box.scrollHeight;
+
+        // Прокручиваем только когда это уместно: при открытии чата, при своей
+        // отправке или если человек и так стоит внизу. Читаете историю —
+        // список остаётся на месте, а о новых сообщениях сообщает кнопка.
+        if (scrollToEnd || wasAtBottom) {
+            box.scrollTop = box.scrollHeight;
+            state.newCount = 0;
+        }
+        updateScrollPill();
+    }
+
+    function isAtBottom() {
+        var box = $('msg-list');
+        return box.scrollHeight - box.scrollTop - box.clientHeight < 140;
+    }
+
+    function updateScrollPill() {
+        var pill = $('scroll-pill');
+        if (!pill) return;
+        var show = state.activeRoom && !isAtBottom();
+        pill.hidden = !show;
+        $('scroll-count').textContent = state.newCount > 0 ? String(state.newCount) : '';
+        if (!show) state.newCount = 0;
+    }
+
+    function jumpToBottom() {
+        var box = $('msg-list');
+        box.scrollTo({ top: box.scrollHeight, behavior: 'smooth' });
+        state.newCount = 0;
+        updateScrollPill();
     }
 
     function sendMessage(textOverride) {
@@ -1748,6 +1855,7 @@
 
         var room = state.activeRoom;
         var stamp = new Date().toISOString();
+        var reply = state.replyTo;
         var temp = {
             id: 'tmp_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
             localKey: 'local_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
@@ -1758,25 +1866,50 @@
             body: text,
             reactions: {},
             created_at: stamp,
+            reply_to: reply ? reply.id : null,
+            reply_name: reply ? reply.name : null,
+            replyBody: reply ? reply.preview : undefined,
             pending: true
         };
+        clearReply();
         state.msgs.push(temp);
         renderMessages(true);
 
         roomKey(room).then(function (key) {
-            return key ? CR.encrypt(key, text) : text;
+            if (!key) return { text: text, quote: reply ? reply.preview : null };
+            return CR.encrypt(key, text).then(function (cipher) {
+                if (!reply) return { text: cipher, quote: null };
+                return CR.encrypt(key, reply.preview).then(function (q) {
+                    return { text: cipher, quote: q };
+                });
+            });
         }).then(function (payload) {
+            var body = {
+                room_id: room,
+                user_id: state.me.id,
+                user_name: state.me.name,
+                text: payload.text,
+                reactions: {},
+                created_at: stamp
+            };
+            if (reply) {
+                body.reply_to = String(reply.id);
+                body.reply_name = reply.name;
+                body.reply_preview = payload.quote;
+            }
             return request('/messages', {
                 method: 'POST',
                 headers: { Prefer: 'return=representation' },
-                body: {
-                    room_id: room,
-                    user_id: state.me.id,
-                    user_name: state.me.name,
-                    text: payload,
-                    reactions: {},
-                    created_at: stamp
-                }
+                body: body
+            }).catch(function (err) {
+                // старая таблица без колонок ответа — отправляем без цитаты
+                if (err.status !== 400 || !reply) throw err;
+                delete body.reply_to; delete body.reply_name; delete body.reply_preview;
+                return request('/messages', {
+                    method: 'POST',
+                    headers: { Prefer: 'return=representation' },
+                    body: body
+                });
             });
         }).then(function (rows) {
             var saved = rows && rows[0];
@@ -1786,6 +1919,7 @@
                 saved.id = String(saved.id);
                 saved.localKey = temp.localKey;       // тот же DOM-узел: без повторной анимации
                 saved.body = text;
+                saved.replyBody = temp.replyBody;
                 if (state.msgs.some(function (x) { return x.id === saved.id && x !== temp; })) {
                     state.msgs.splice(idx, 1);
                 } else {
@@ -1817,8 +1951,10 @@
     /* --------------------------------------------------------- реакции */
 
     function closePicker() {
-        var old = document.querySelector('.reaction-picker');
-        if (old && old.parentNode) old.parentNode.removeChild(old);
+        var open = document.querySelectorAll('.msg-menu, .reaction-picker');
+        Array.prototype.forEach.call(open, function (node) {
+            if (node.parentNode) node.parentNode.removeChild(node);
+        });
         state.pickerOpen = null;
         if (state.pendingRender) {
             state.pendingRender = false;
@@ -1832,23 +1968,52 @@
         if (!msg || msg.pending) return;
 
         state.pickerOpen = msgId;
-        var picker = document.createElement('div');
-        picker.className = 'reaction-picker';
-        picker.innerHTML = EMOJIS.map(function (e, i) {
-            return '<span class="emoji-btn" style="--i:' + i + '" data-pick="' + esc(e) + '">' + esc(e) + '</span>';
-        }).join('') + (msg.user_id === state.me.id
-            ? '<span class="emoji-btn del" style="--i:6" data-del="1" title="Удалить">🗑</span>' : '');
+        var mine = msg.user_id === state.me.id;
+        var chosen = myReaction(msg);
+        var isChannel = state.activeChat && state.activeChat.kind === 'channel';
+        var hasReactions = Object.keys(normalizeReactions(msg.reactions)).length > 0;
 
-        picker.addEventListener('click', function (ev) {
-            var pick = ev.target.getAttribute('data-pick');
-            var del = ev.target.getAttribute('data-del');
+        var menu = document.createElement('div');
+        menu.className = 'msg-menu';
+
+        var html = '<div class="menu-emojis">' + EMOJIS.map(function (e, i) {
+            return '<span class="emoji-btn' + (chosen === e ? ' chosen' : '') + '"' +
+                ' style="--i:' + i + '" data-pick="' + esc(e) + '">' + esc(e) + '</span>';
+        }).join('') + '</div>';
+
+        if (canPost(state.activeChat)) {
+            html += '<div class="menu-item" data-act="reply"><span>↩️</span> Ответить</div>';
+        }
+        html += '<div class="menu-item" data-act="copy"><span>📋</span> Копировать</div>';
+        if (hasReactions && !isChannel) {
+            html += '<div class="menu-item" data-act="who"><span>😊</span> Кто отреагировал</div>';
+        }
+        if (mine) {
+            html += '<div class="menu-item danger" data-act="delete"><span>🗑</span> Удалить</div>';
+        }
+        menu.innerHTML = html;
+
+        menu.addEventListener('click', function (ev) {
             ev.stopPropagation();
+            var pick = ev.target.getAttribute('data-pick');
+            var item = ev.target.closest('.menu-item');
+            var act = item && item.getAttribute('data-act');
             closePicker();
-            if (pick) toggleReaction(msgId, pick);
-            else if (del) deleteMessage(msgId);
+            if (pick) setReaction(msgId, pick);
+            else if (act === 'reply') startReply(msg);
+            else if (act === 'copy') copyMessage(msg);
+            else if (act === 'who') openReactionList(msgId);
+            else if (act === 'delete') deleteMessage(msgId);
         });
 
-        bubble.appendChild(picker);
+        bubble.appendChild(menu);
+
+        // если сообщение у верхнего края — раскрываем меню вниз
+        var box = $('msg-list');
+        if (bubble.getBoundingClientRect().top - box.getBoundingClientRect().top < menu.offsetHeight + 16) {
+            menu.classList.add('flip');
+        }
+
         setTimeout(function () {
             document.addEventListener('click', function once() {
                 closePicker();
@@ -1857,24 +2022,125 @@
         }, 10);
     }
 
-    function toggleReaction(msgId, emoji) {
+    function copyMessage(msg) {
+        var text = msg.body === undefined ? msg.text : msg.body;
+        if (isImage(text)) { toast('Это изображение'); return; }
+        var done = function () { toast('Скопировано'); };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done, function () { toast('Не удалось скопировать'); });
+        } else {
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); done(); } catch (e) { toast('Не удалось скопировать'); }
+            document.body.removeChild(ta);
+        }
+    }
+
+    /* ---------------------------------------------------- ответы на сообщения */
+
+    function replySnippet(msg) {
+        var text = msg.body === undefined ? msg.text : msg.body;
+        if (isImage(text)) return '📷 Фото';
+        return String(text || '').slice(0, 120);
+    }
+
+    function startReply(msg) {
+        state.replyTo = {
+            id: msg.id,
+            name: msg.user_id === state.me.id ? 'Вы' : (msg.user_name || 'Участник'),
+            preview: replySnippet(msg)
+        };
+        $('reply-name').textContent = state.replyTo.name;
+        $('reply-preview').textContent = state.replyTo.preview;
+        $('reply-bar').hidden = false;
+        $('m-input').focus();
+    }
+
+    function clearReply() {
+        state.replyTo = null;
+        $('reply-bar').hidden = true;
+    }
+
+    function scrollToMessage(id) {
+        var node = $('msg-list').querySelector('[data-msg="' + String(id).replace(/"/g, '') + '"]');
+        if (!node) { toast('Сообщение не найдено в загруженной истории'); return; }
+        node.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        node.classList.remove('flash');
+        void node.offsetWidth;
+        node.classList.add('flash');
+    }
+
+    function myReaction(msg) {
+        var reactions = normalizeReactions(msg && msg.reactions);
+        var found = null;
+        Object.keys(reactions).forEach(function (emoji) {
+            if (reactions[emoji].indexOf(state.me.id) >= 0) found = emoji;
+        });
+        return found;
+    }
+
+    /* От одного человека — одна реакция на сообщение: новая заменяет прежнюю,
+       повторное нажатие на ту же снимает её. */
+    function setReaction(msgId, emoji) {
         var msg = state.msgs.filter(function (m) { return m.id === msgId; })[0];
         if (!msg) return;
 
         var reactions = normalizeReactions(msg.reactions);
-        var users = reactions[emoji] || [];
-        var idx = users.indexOf(state.me.id);
-        if (idx >= 0) users.splice(idx, 1);
-        else { users.push(state.me.id); vibrate(25); }
+        var had = (reactions[emoji] || []).indexOf(state.me.id) >= 0;
 
-        if (users.length) reactions[emoji] = users;
-        else delete reactions[emoji];
+        Object.keys(reactions).forEach(function (k) {
+            var rest = reactions[k].filter(function (u) { return u !== state.me.id; });
+            if (rest.length) reactions[k] = rest;
+            else delete reactions[k];
+        });
+
+        if (!had) {
+            reactions[emoji] = (reactions[emoji] || []).concat([state.me.id]);
+            vibrate(25);
+        }
 
         msg.reactions = reactions;
         renderMessages(false);
 
         request('/messages?id=eq.' + q(msgId), { method: 'PATCH', body: { reactions: reactions } })
             .catch(function (e) { toast(e.message || 'Реакция не сохранена'); });
+    }
+
+    /* Кто отреагировал: в каналах не показываем. */
+    function openReactionList(msgId) {
+        if (state.activeChat && state.activeChat.kind === 'channel') return;
+        var msg = state.msgs.filter(function (m) { return m.id === msgId; })[0];
+        if (!msg) return;
+
+        var reactions = normalizeReactions(msg.reactions);
+        var rows = [];
+        Object.keys(reactions).forEach(function (emoji) {
+            reactions[emoji].forEach(function (uid) { rows.push({ emoji: emoji, uid: uid }); });
+        });
+        if (!rows.length) return;
+
+        var box = $('reactions-list');
+        box.innerHTML = '<div class="muted small" style="padding:10px 4px">Загрузка…</div>';
+        $('reactions-modal').classList.add('show');
+
+        var unknown = rows.map(function (r) { return r.uid; })
+            .filter(function (id) { return id && id.indexOf('legacy_') !== 0; });
+
+        loadProfiles(unknown).then(function () {
+            box.innerHTML = rows.map(function (r, i) {
+                var p = state.profiles[r.uid];
+                var name = p ? (p.name || '@' + p.nickname) : 'Участник';
+                var nick = p ? '@' + p.nickname : '';
+                var av = (p && p.avatar) || avatarFor(name, r.uid);
+                return '<div class="reaction-user" style="--i:' + i + '" data-uid="' + esc(r.uid) + '">' +
+                    '<img alt="" src="' + esc(av) + '">' +
+                    '<b>' + esc(name) + '</b>' +
+                    '<span class="muted small">' + esc(nick) + '</span>' +
+                    '<span class="emoji">' + esc(r.emoji) + '</span></div>';
+            }).join('');
+        });
     }
 
     /* --------------------------------------------------- меню и действия чата */
@@ -1998,6 +2264,61 @@
         state.listSig = '';
         renderChatList();
         pollChat(true);
+    }
+
+    /* ------------------------------------------------------ профиль человека */
+
+    function openProfile(userId) {
+        if (!userId) return;
+        var modal = $('profile-modal');
+        var isMe = userId === state.me.id;
+
+        function paint(p) {
+            var name = p ? (p.name || p.nickname) : 'Участник';
+            $('pf-av').src = (p && p.avatar) || avatarFor(name, userId);
+            $('pf-name').textContent = name;
+            $('pf-nick').textContent = p && p.nickname ? '@' + p.nickname : '';
+            $('pf-extra').textContent = isMe ? 'Это ваш профиль' : '';
+            $('pf-write').hidden = isMe || !p;
+            $('pf-write').onclick = function () {
+                modal.classList.remove('show');
+                if (p) startDialog(p.nickname);
+            };
+        }
+
+        paint(state.profiles[userId] || (isMe ? state.me : null));
+        modal.classList.add('show');
+
+        if (!state.profiles[userId] && !isMe) {
+            loadProfiles([userId]).then(function () { paint(state.profiles[userId]); });
+        }
+    }
+
+    /* Заголовок чата: личный — профиль собеседника, группа и канал — состав. */
+    function openChatInfo() {
+        var chat = state.activeChat;
+        if (!chat) return;
+        if (chat.kind === 'dm') {
+            var other = (chat.members || []).filter(function (m) { return m !== state.me.id; })[0];
+            if (other) openProfile(other);
+            return;
+        }
+
+        var ids = (chat.members || []).slice(0, 50);
+        var box = $('reactions-list');
+        box.innerHTML = '<div class="muted small" style="padding:10px 4px">Загрузка…</div>';
+        $('reactions-modal').classList.add('show');
+        loadProfiles(ids).then(function () {
+            box.innerHTML = ids.map(function (id, i) {
+                var p = state.profiles[id];
+                var name = p ? (p.name || p.nickname) : 'Участник';
+                var role = id === chat.owner_id ? 'автор' : '';
+                return '<div class="reaction-user" style="--i:' + i + '" data-uid="' + esc(id) + '">' +
+                    '<img alt="" src="' + esc((p && p.avatar) || avatarFor(name, id)) + '">' +
+                    '<b>' + esc(name) + '</b>' +
+                    '<span class="muted small">' + esc(role) + '</span></div>';
+            }).join('');
+        });
     }
 
     /* -------------------------------------------------- модалки (без alert) */
@@ -2220,19 +2541,63 @@
                 $('lightbox').classList.add('show');
                 return;
             }
+
+            var author = e.target.closest('.author');
+            if (author) {
+                e.stopPropagation();
+                openProfile(author.getAttribute('data-author'));
+                return;
+            }
+
+            var quote = e.target.closest('.quote');
+            if (quote) {
+                e.stopPropagation();
+                scrollToMessage(quote.getAttribute('data-goto'));
+                return;
+            }
+
             var badge = e.target.closest('.reaction-badge');
             if (badge) {
                 e.stopPropagation();
-                toggleReaction(badge.getAttribute('data-react'), badge.getAttribute('data-emoji'));
+                var id = badge.getAttribute('data-react');
+                if (state.activeChat && state.activeChat.kind === 'channel') {
+                    setReaction(id, badge.getAttribute('data-emoji'));
+                } else {
+                    openReactionList(id);
+                }
                 return;
             }
-            if (e.target.closest('.reaction-picker')) return;
+
+            if (e.target.closest('.msg-menu')) return;
             var bubble = e.target.closest('.bubble');
             if (bubble) {
                 e.stopPropagation();
                 openPicker(bubble, bubble.getAttribute('data-msg'));
             }
         });
+
+        $('msg-list').addEventListener('scroll', updateScrollPill, { passive: true });
+        $('scroll-pill').addEventListener('click', jumpToBottom);
+        $('reply-cancel').addEventListener('click', clearReply);
+        $('chat-head').addEventListener('click', openChatInfo);
+
+        $('reactions-list').addEventListener('click', function (e) {
+            var row = e.target.closest('.reaction-user');
+            if (!row) return;
+            $('reactions-modal').classList.remove('show');
+            openProfile(row.getAttribute('data-uid'));
+        });
+        $('reactions-close').addEventListener('click', function () {
+            $('reactions-modal').classList.remove('show');
+        });
+        $('reactions-modal').addEventListener('click', function (e) {
+            if (e.target === this) this.classList.remove('show');
+        });
+        $('pf-close').addEventListener('click', function () { $('profile-modal').classList.remove('show'); });
+        $('profile-modal').addEventListener('click', function (e) {
+            if (e.target === this) this.classList.remove('show');
+        });
+        $('set-profile').addEventListener('click', function () { openProfile(state.me.id); });
 
         $('lightbox').addEventListener('click', function () { this.classList.remove('show'); });
 
@@ -2310,7 +2675,6 @@
         applyMotion();
         bindEvents();
         setAuthMode(false);
-        $('build-host').textContent = location.hostname || 'локально';
 
         state.me = normalizeUser(readJSON(LS.user, null));
         if (state.me && state.me.id) startApp();

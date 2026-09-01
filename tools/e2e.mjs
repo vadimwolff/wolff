@@ -149,8 +149,8 @@ await step('галочки становятся «прочитано»', async (
 
 await step('реакция ставится и видна собеседнику', async () => {
     await alice.page.click('.bubble.in');
-    await alice.page.waitForSelector('.reaction-picker');
-    await alice.page.click('.reaction-picker .emoji-btn[data-pick="🔥"]');
+    await alice.page.waitForSelector('.msg-menu');
+    await alice.page.click('.msg-menu .emoji-btn[data-pick="🔥"]');
     await alice.page.waitForSelector('.bubble.in .reaction-badge.mine', { timeout: 10000 });
     await bob.page.waitForFunction(
         () => {
@@ -159,8 +159,10 @@ await step('реакция ставится и видна собеседнику
         }, null, { timeout: 20000 });
 });
 
-await step('повторное нажатие снимает реакцию', async () => {
-    await alice.page.click('.bubble.in .reaction-badge');
+await step('повторный выбор той же реакции снимает её', async () => {
+    await alice.page.click('.bubble.in');
+    await alice.page.waitForSelector('.msg-menu .emoji-btn.chosen');
+    await alice.page.click('.msg-menu .emoji-btn.chosen');
     await alice.page.waitForFunction(
         () => !document.querySelector('.bubble.in .reaction-badge'), null, { timeout: 10000 });
 });
@@ -179,8 +181,8 @@ await step('длинное сообщение и перенос строк не 
 await step('удаление своего сообщения', async () => {
     const before = await alice.page.locator('.bubble.out').count();
     await alice.page.locator('.bubble.out').last().click();
-    await alice.page.waitForSelector('.reaction-picker .emoji-btn.del');
-    await alice.page.click('.reaction-picker .emoji-btn.del');
+    await alice.page.waitForSelector('.msg-menu .menu-item[data-act="delete"]');
+    await alice.page.click('.msg-menu .menu-item[data-act="delete"]');
     await alice.page.waitForFunction(
         (n) => document.querySelectorAll('.bubble.out').length === n - 1, before, { timeout: 15000 });
 });
@@ -189,12 +191,12 @@ await step('смена темы сохраняется после перезаг
     await alice.page.click('#btn-back');
     await alice.page.click('#btn-settings');
     await alice.page.waitForSelector('#page-settings.active');
-    await alice.page.click('.theme-card[data-theme="lavender"]');
-    await alice.page.waitForFunction(() => document.body.className === 'theme-lavender');
+    await alice.page.click('.theme-card[data-theme="dusk"]');
+    await alice.page.waitForFunction(() => document.body.className === 'theme-dusk');
     await alice.page.reload();
     await alice.page.waitForSelector('#page-main.active', { timeout: 15000 });
     const cls = await alice.page.evaluate(() => document.body.className);
-    assert(cls === 'theme-lavender', 'после перезагрузки: ' + cls);
+    assert(cls === 'theme-dusk', 'после перезагрузки: ' + cls);
 });
 
 await step('сессия сохраняется между перезагрузками', async () => {

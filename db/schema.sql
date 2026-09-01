@@ -145,6 +145,11 @@ alter table public.messages add column if not exists reactions  jsonb default '{
 alter table public.messages add column if not exists created_at timestamptz default now();
 alter table public.messages add column if not exists user_name  text;
 
+-- ответы на сообщения: цитата хранится рядом, чтобы не делать лишних запросов
+alter table public.messages add column if not exists reply_to      text;
+alter table public.messages add column if not exists reply_name    text;
+alter table public.messages add column if not exists reply_preview text;
+
 update public.messages set reactions = '{}'::jsonb where reactions is null;
 
 do $$
@@ -374,7 +379,7 @@ begin
 end;
 $$;
 
-/* Единый поиск: публичные каналы + пользователи, как в строке поиска Telegram. */
+/* Единый поиск: публичные каналы и пользователи одним запросом. */
 create or replace function public.wm_search(p_query text, p_me text)
 returns json
 language plpgsql
