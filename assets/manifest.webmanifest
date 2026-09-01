@@ -1,20 +1,30 @@
 {
+  "id": "/wolffmsg",
   "name": "WolffMsg",
   "short_name": "WolffMsg",
-  "description": "Лёгкий веб-мессенджер",
+  "description": "Мессенджер с каналами и сквозным шифрованием",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
   "orientation": "portrait",
-  "background_color": "#000000",
-  "theme_color": "#000000",
+  "background_color": "#0e0e10",
+  "theme_color": "#0e0e10",
   "lang": "ru",
+  "dir": "ltr",
+  "categories": ["social", "communication"],
   "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ],
+  "shortcuts": [
     {
-      "src": "icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "any maskable"
+      "name": "Новый чат",
+      "short_name": "Написать",
+      "url": "./?action=new",
+      "icons": [{ "src": "icon-192.png", "sizes": "192x192" }]
     }
   ]
 }

@@ -2,7 +2,7 @@
    Оболочка приложения отдаётся из кэша мгновенно, а свежая версия
    подтягивается в фоне. Запросы к API не кэшируются никогда. */
 
-var CACHE = 'wolffmsg-v50-1';
+var CACHE = 'wolffmsg-v54-1';
 
 var SHELL = [
     './',
@@ -12,6 +12,8 @@ var SHELL = [
     './assets/config.js',
     './assets/crypto.js',
     './assets/icon.svg',
+    './assets/icon-192.png',
+    './assets/icon-512.png',
     './assets/manifest.webmanifest'
 ];
 
@@ -71,4 +73,52 @@ self.addEventListener('fetch', function (event) {
             return hit || network;
         })
     );
+});
+
+/* ==========================================================================
+   УВЕДОМЛЕНИЯ
+
+   Нажатие на уведомление открывает нужный чат: если приложение уже запущено,
+   переключаем на него, иначе открываем новое окно с адресом чата.
+   ========================================================================== */
+
+self.addEventListener('notificationclick', function (event) {
+    var data = (event.notification && event.notification.data) || {};
+    event.notification.close();
+
+    var target = './';
+    if (data.room) {
+        target = './?open=' + encodeURIComponent(data.room) +
+            (data.msg ? '&msg=' + encodeURIComponent(data.msg) : '');
+    }
+
+    event.waitUntil(
+        self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function (list) {
+            for (var i = 0; i < list.length; i++) {
+                var client = list[i];
+                if (client.url.indexOf(self.registration.scope) === 0 && 'focus' in client) {
+                    client.postMessage({ type: 'open-chat', room: data.room, msg: data.msg });
+                    return client.focus();
+                }
+            }
+            if (self.clients.openWindow) return self.clients.openWindow(target);
+        })
+    );
+});
+
+/* Push с сервера (когда он появится): показываем то же уведомление. */
+self.addEventListener('push', function (event) {
+    var payload = {};
+    try { payload = event.data ? event.data.json() : {}; } catch (e) { payload = {}; }
+
+    var title = payload.title || 'WolffMsg';
+    var options = {
+        body: payload.body || 'Новое сообщение',
+        icon: './assets/icon-192.png',
+        badge: './assets/icon-192.png',
+        tag: payload.room || 'wolffmsg',
+        renotify: true,
+        data: { room: payload.room, msg: payload.msg }
+    };
+    event.waitUntil(self.registration.showNotification(title, options));
 });

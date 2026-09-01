@@ -154,6 +154,9 @@ async function subscribe(user) {
     await user.page.click('#global-results .f-item[data-channel]');
     await user.page.waitForSelector('#page-chat.active', { timeout: 25000 });
     await user.page.waitForSelector('.bubble.in', { timeout: 25000 });
+    await user.page.click('#btn-join');                    // подписка только по кнопке
+    await user.page.waitForFunction(
+        () => document.getElementById('btn-join').hidden, null, { timeout: 25000 });
 }
 
 await step('двое подписываются на канал', async () => {

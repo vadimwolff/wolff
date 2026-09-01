@@ -28,7 +28,9 @@
         cacheChats: 'WM_CACHE_CHATS',
         cacheMsgs: 'WM_CACHE_MSGS_',
         code: 'WM_CODE_',
-        identity: 'WM_IDENTITY'
+        identity: 'WM_IDENTITY',
+        notify: 'WM_NOTIFY',
+        notified: 'WM_NOTIFIED'
     };
 
     var THEMES = [
@@ -44,6 +46,7 @@
     var THEME_ALIASES = { ocean: 'dusk', forest: 'moss', lavender: 'dusk', emerald: 'moss', purple: 'dusk' };
 
     var EMOJIS = ['👍', '❤️', '🔥', '😂', '😮', '😢'];
+    var TRANSPARENT_PIXEL = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
     var LOCKED_LABEL = '🔒 Зашифровано — введите код чата';
 
     /* ---------------------------------------------------------------- state */
@@ -56,6 +59,10 @@
         activeChat: null,
         msgs: [],
         reads: {},
+        photos: {},             // id вложения -> готовое изображение
+        photoTasks: {},         // id -> Promise загрузки
+        hasAttachments: true,   // есть ли таблица вложений
+        pinBottom: true,        // держать ли чат прижатым к последнему сообщению
         keys: {},               // room_id -> CryptoKey (ключ комнаты)
         keyTasks: {},           // room_id -> Promise, чтобы не запрашивать ключ дважды
         virtual: {},            // комнаты обсуждений под записями канала
@@ -166,6 +173,12 @@
     }
 
     function isImage(text) { return typeof text === 'string' && text.indexOf('data:image/') === 0; }
+
+    /* Новый формат фотографии: в сообщении лежит только ссылка на вложение,
+       поэтому список сообщений остаётся лёгким. */
+    function isPhotoRef(text) { return typeof text === 'string' && text.indexOf('wmimg:') === 0; }
+    function isPhoto(text) { return isImage(text) || isPhotoRef(text); }
+    function attachmentId(text) { return String(text).slice('wmimg:'.length); }
 
     function hashCode(s) {
         var h = 0, i;
@@ -690,6 +703,17 @@
     function decodeMessage(m, key) {
         if (m.body !== undefined) return Promise.resolve(m);
 
+        var thumbTask = Promise.resolve();
+        if (m.thumb) {
+            if (!CR || !CR.isEncrypted(m.thumb)) {
+                m.thumbBody = m.thumb;
+            } else if (key) {
+                thumbTask = CR.decrypt(key, m.thumb)
+                    .then(function (plain) { m.thumbBody = plain; })
+                    .catch(function () { m.thumbBody = null; });
+            }
+        }
+
         var quote = Promise.resolve();
         if (m.reply_preview) {
             if (!CR || !CR.isEncrypted(m.reply_preview)) {
@@ -703,7 +727,7 @@
             }
         }
 
-        return quote.then(function () {
+        return Promise.all([quote, thumbTask]).then(function () {
             if (!CR || !CR.isEncrypted(m.text)) {
                 m.body = m.text;
                 m.encrypted = false;
@@ -1072,7 +1096,9 @@
 
     /* ----------------------------------------------------------- изображения */
 
-    function shrinkImage(file) {
+    function shrinkImage(file, maxSide, quality) {
+        maxSide = maxSide || CFG.imageMaxSide;
+        quality = quality || CFG.imageQuality;
         return new Promise(function (resolve, reject) {
             var reader = new FileReader();
             reader.onerror = function () { reject(WMError('Не удалось прочитать файл')); };
@@ -1080,8 +1106,7 @@
                 var img = new Image();
                 img.onerror = function () { reject(WMError('Не удалось открыть изображение')); };
                 img.onload = function () {
-                    var max = CFG.imageMaxSide;
-                    var scale = Math.min(1, max / Math.max(img.width, img.height));
+                    var scale = Math.min(1, maxSide / Math.max(img.width, img.height));
                     var w = Math.max(1, Math.round(img.width * scale));
                     var h = Math.max(1, Math.round(img.height * scale));
                     var canvas = document.createElement('canvas');
@@ -1089,7 +1114,7 @@
                     canvas.height = h;
                     canvas.getContext('2d').drawImage(img, 0, 0, w, h);
                     try {
-                        resolve(canvas.toDataURL('image/jpeg', CFG.imageQuality));
+                        resolve(canvas.toDataURL('image/jpeg', quality));
                     } catch (err) { reject(WMError('Не удалось обработать изображение')); }
                 };
                 img.src = e.target.result;
@@ -1117,8 +1142,105 @@
         var file = input.files && input.files[0];
         input.value = '';
         if (!file || !state.activeRoom) return;
-        shrinkImage(file).then(function (data) { sendMessage(data); })
-            .catch(function (e) { toast(e.message || 'Не удалось отправить фото'); });
+
+        var room = state.activeRoom;
+        Promise.all([
+            shrinkImage(file, CFG.imageMaxSide, CFG.imageQuality),
+            shrinkImage(file, 56, 0.45)          // крошечное превью для мгновенного показа
+        ]).then(function (parts) {
+            return sendPhoto(room, parts[0], parts[1]);
+        }).catch(function (e) { toast(e.message || 'Не удалось отправить фото'); });
+    }
+
+    /* Полный снимок уходит в отдельную таблицу, в сообщении остаётся ссылка на
+       него и маленькое превью — поэтому чат открывается мгновенно. */
+    function sendPhoto(room, full, thumb) {
+        if (!state.hasAttachments) return sendMessage(full);
+
+        return roomKey(room).then(function (key) {
+            if (!key) return { data: full, thumb: thumb };
+            return Promise.all([CR.encrypt(key, full), CR.encrypt(key, thumb)])
+                .then(function (p) { return { data: p[0], thumb: p[1] }; });
+        }).then(function (payload) {
+            return request('/attachments', {
+                method: 'POST',
+                headers: { Prefer: 'return=representation' },
+                body: { room_id: room, user_id: state.me.id, data: payload.data }
+            }).then(function (rows) {
+                var id = rows && rows[0] && rows[0].id;
+                if (!id) throw WMError('Вложение не сохранено');
+                state.photos[String(id)] = full;          // своё фото показываем сразу
+                sendMessage('wmimg:' + id, { thumb: payload.thumb, thumbBody: thumb });
+            });
+        }).catch(function (err) {
+            if (missingRelation(err)) {                   // база прошлой версии
+                state.hasAttachments = false;
+                return sendMessage(full);
+            }
+            toast(err.message || 'Не удалось отправить фото');
+        });
+    }
+
+    /* Подгружает полный снимок и подменяет превью прямо в узле. */
+    function loadAttachment(id, node) {
+        if (state.photos[id]) {
+            applyPhoto(node, state.photos[id]);
+            return Promise.resolve();
+        }
+        if (state.photoTasks[id]) return state.photoTasks[id];
+
+        var room = state.activeRoom;
+        state.photoTasks[id] = request('/attachments?id=eq.' + q(id) + '&select=data&limit=1')
+            .then(function (rows) {
+                if (!rows || !rows.length) throw WMError('Вложение не найдено');
+                return roomKey(room).then(function (key) {
+                    var data = rows[0].data;
+                    if (!key || !CR.isEncrypted(data)) return data;
+                    return CR.decrypt(key, data);
+                });
+            })
+            .then(function (data) {
+                state.photos[id] = data;
+                delete state.photoTasks[id];
+                applyPhoto(node, data);
+            })
+            .catch(function () {
+                delete state.photoTasks[id];
+                if (node) node.classList.remove('loading');
+            });
+
+        return state.photoTasks[id];
+    }
+
+    function applyPhoto(node, data) {
+        if (!node) return;
+        node.onload = function () {
+            node.classList.remove('loading');
+            // картинка изменила высоту — если стоим внизу, остаёмся внизу
+            var box = $('msg-list');
+            if (box && (state.pinBottom || isAtBottom())) box.scrollTop = box.scrollHeight;
+        };
+        node.src = data;
+        node.setAttribute('data-loaded', '1');
+    }
+
+    /* После отрисовки догружаем видимые фотографии, по три за раз. */
+    function hydratePhotos() {
+        var nodes = $('msg-list').querySelectorAll('img[data-att]:not([data-loaded])');
+        var queue = Array.prototype.slice.call(nodes).reverse();   // сначала свежие
+        var active = 0;
+
+        function next() {
+            while (active < 3 && queue.length) {
+                var node = queue.shift();
+                active++;
+                loadAttachment(node.getAttribute('data-att'), node).then(function () {
+                    active--;
+                    next();
+                });
+            }
+        }
+        next();
     }
 
     /* ------------------------------------------------------- локальные метки */
@@ -1275,7 +1397,7 @@
         var oldest = rooms.map(myLastRead).sort()[0];
 
         var previewReq = state.hasPreviews
-            ? request('/chat_previews?room_id=' + q(inList) + '&select=room_id,user_id,user_name,preview,created_at')
+            ? request('/chat_previews?room_id=' + q(inList) + '&select=room_id,id,user_id,user_name,preview,created_at')
                 .catch(function (err) {
                     if (missingRelation(err)) { state.hasPreviews = false; return null; }
                     throw err;
@@ -1290,6 +1412,7 @@
                     var p = map[c.room_id];
                     c.preview = p ? p.preview : '';
                     c.ts = p ? p.created_at : null;
+                    c.lastId = p ? String(p.id) : null;
                 });
             }
             return request('/messages?room_id=' + q(inList) +
@@ -1306,9 +1429,12 @@
             });
             state.chats.forEach(function (c) {
                 c.unread = counts[c.room_id] || 0;
-                if (!state.hasPreviews && last[c.room_id]) c.ts = last[c.room_id].created_at;
+                if (!state.hasPreviews && last[c.room_id]) {
+                    c.ts = last[c.room_id].created_at;
+                    c.lastId = String(last[c.room_id].id);
+                }
             });
-            return decodePreviews();
+            return decodePreviews().then(maybeNotify);
         }).catch(function (err) {
             if (err.status) throw err;
         });
@@ -1626,6 +1752,32 @@
             });
     }
 
+    /* Канал из поиска открывается только для чтения. Подписка происходит
+       исключительно по кнопке внизу — просто зайти и «случайно подписаться»
+       больше нельзя. */
+    function previewChannel(room) {
+        if (findChat(room)) { openChat(room); return; }
+
+        var found = null;
+        var res = state.globalResults;
+        if (res && res.channels) {
+            found = res.channels.filter(function (c) { return c.room_id === room; })[0] || null;
+        }
+
+        state.virtual[room] = {
+            room_id: room,
+            kind: 'channel',
+            name: found ? found.name : 'Канал',
+            slug: found ? found.slug : null,
+            about: found ? found.about : '',
+            owner_id: found ? found.owner_id : null,
+            subscribers: found ? found.subscribers : 0,
+            members: [],                       // себя в участники не добавляем
+            preview: true
+        };
+        openChat(room);
+    }
+
     function joinChannel(room) {
         return rpc('wm_join_chat', { p_room: room, p_user: state.me.id })
             .then(function (res) {
@@ -1645,9 +1797,11 @@
             })
             .then(function () { return syncChats(); })
             .then(function () {
+                delete state.virtual[room];        // теперь это обычный чат из списка
                 $('chat-search').value = '';
                 runSearch('');
                 openChat(room);
+                toast('Вы подписались');
             })
             .catch(function (e) { toast(e.message || 'Не удалось подписаться'); });
     }
@@ -1853,6 +2007,7 @@
         $('chat-subtitle').textContent = sub;
 
         $('act-invite').hidden = chat.kind !== 'group';
+        $('act-leave').hidden = chat.kind === 'dm' || (chat.kind === 'channel' && !isMember(chat));
         $('act-leave').hidden = chat.kind === 'dm';
         $('act-delete').hidden = chat.kind === 'channel' && chat.owner_id !== state.me.id;
         $('act-clear').hidden = !canPost(chat);
@@ -1880,6 +2035,7 @@
         state.pendingRender = false;
         state.firstChatPaint = true;
         state.newCount = 0;
+        state.pinBottom = true;        // при открытии всегда показываем конец переписки
         state.unreadFrom = myLastRead(room);
         clearReply();
         updateScrollPill();
@@ -1931,7 +2087,8 @@
                 if (typeof text === 'string' && text.length > 20000) text = '📷 Фото';
                 return {
                     id: m.id, room_id: m.room_id, user_id: m.user_id, user_name: m.user_name,
-                    text: text, reactions: m.reactions, created_at: m.created_at
+                    text: text, thumb: m.thumb, reply_to: m.reply_to, reply_name: m.reply_name,
+                    reply_preview: m.reply_preview, reactions: m.reactions, created_at: m.created_at
                 };
             });
         writeJSON(LS.cacheMsgs + room, slim);
@@ -1977,7 +2134,8 @@
         if (!room) return Promise.resolve();
 
         var base = 'id,room_id,user_id,user_name,text,reactions,created_at';
-        var fields = state.hasReplies ? base + ',reply_to,reply_name,reply_preview' : base;
+        var fields = state.hasReplies
+            ? base + ',reply_to,reply_name,reply_preview,thumb' : base;
         var newerThan = initial ? null : lastCreatedAt();
 
         function fetchRange(cols) {
@@ -2091,17 +2249,28 @@
         return out;
     }
 
+    /* Одна галочка — сообщение на сервере, две — собеседник его прочитал.
+       Пока сообщение уходит, показываются часики. */
     function statusClass(m) {
-        if (m.pending) return 'status-sent';
+        if (m.pending) return 'status-pending';
         if (m.failed) return 'status-failed';
         var read = othersLastRead(state.activeRoom);
         if (read && String(m.created_at) <= read) return 'status-read';
-        return 'status-delivered';
+        return 'status-sent';
     }
 
     var CHECK_SVG = '<svg class="check-svg" viewBox="0 0 20 14">' +
         '<path class="check-path first" d="M2 8.2 L6 12 L13 3"/>' +
         '<path class="check-path second" d="M8 8.6 L11.4 12 L18 3"/></svg>';
+
+    var CLOCK_SVG = '<svg class="check-svg clock" viewBox="0 0 20 20">' +
+        '<circle cx="10" cy="10" r="7"/><path d="M10 6 L10 10.5 L13 12"/></svg>';
+
+    function statusIcon(m) {
+        var cls = statusClass(m);
+        return '<span class="status-icon ' + cls + '">' +
+            (cls === 'status-pending' ? CLOCK_SVG : CHECK_SVG) + '</span>';
+    }
 
     /* ------------------------------------------------- отрисовка сообщений
        Список сверяется по ключам: неизменившиеся узлы не трогаются вообще.
@@ -2119,7 +2288,8 @@
             m.user_name || '',
             m.reply_to || '',
             m.replyBody === undefined ? (m.reply_preview || '') : m.replyBody,
-            state.commentCounts[m.id] === undefined ? '' : state.commentCounts[m.id]
+            state.commentCounts[m.id] === undefined ? '' : state.commentCounts[m.id],
+            m.thumbBody ? '1' : '0'
         ].join('\u0001');
     }
 
@@ -2130,6 +2300,13 @@
         var content;
         if (m.locked) {
             content = '<span class="locked">' + esc(body) + '</span>';
+        } else if (isPhotoRef(body)) {
+            var id = attachmentId(body);
+            var ready = state.photos[id];
+            content = '<img class="photo' + (ready ? '' : ' loading') + '"' +
+                ' src="' + esc(ready || m.thumbBody || TRANSPARENT_PIXEL) + '"' +
+                ' alt="фото" data-photo="1" data-att="' + esc(id) + '"' +
+                (ready ? ' data-loaded="1"' : '') + '>';
         } else if (isImage(body)) {
             content = '<img class="photo" src="' + esc(body) + '" alt="фото" data-photo="1">';
         } else {
@@ -2171,7 +2348,7 @@
 
         return author + quote + '<div class="text">' + content + '</div>' + rHtml + foot +
             '<div class="bubble-meta">' + esc(fmtTime(m.created_at)) +
-            (out ? '<span class="status-icon ' + statusClass(m) + '">' + CHECK_SVG + '</span>' : '') +
+            (out ? statusIcon(m) : '') +
             '</div>';
     }
 
@@ -2277,11 +2454,12 @@
         // Прокручиваем только когда это уместно: при открытии чата, при своей
         // отправке или если человек и так стоит внизу. Читаете историю —
         // список остаётся на месте, а о новых сообщениях сообщает кнопка.
-        if (scrollToEnd || wasAtBottom) {
+        if (scrollToEnd || wasAtBottom || state.pinBottom) {
             box.scrollTop = box.scrollHeight;
             state.newCount = 0;
         }
         updateScrollPill();
+        hydratePhotos();
     }
 
     function isAtBottom() {
@@ -2292,6 +2470,7 @@
     function updateScrollPill() {
         var pill = $('scroll-pill');
         if (!pill) return;
+        if (!isAtBottom()) state.pinBottom = false;      // человек ушёл читать историю
         var show = state.activeRoom && !isAtBottom();
         pill.hidden = !show;
         $('scroll-count').textContent = state.newCount > 0 ? String(state.newCount) : '';
@@ -2302,10 +2481,13 @@
         var box = $('msg-list');
         box.scrollTo({ top: box.scrollHeight, behavior: 'smooth' });
         state.newCount = 0;
-        updateScrollPill();
+        state.pinBottom = true;
+        $('scroll-pill').hidden = true;
+        $('scroll-count').textContent = '';
     }
 
-    function sendMessage(textOverride) {
+    function sendMessage(textOverride, extra) {
+        extra = extra || {};
         var input = $('m-input');
         var text = textOverride !== undefined ? textOverride : input.value.trim();
         if (!text || !state.activeRoom) return;
@@ -2323,6 +2505,8 @@
             user_name: state.me.name,
             text: text,
             body: text,
+            thumb: extra.thumb || null,
+            thumbBody: extra.thumbBody,
             reactions: {},
             created_at: stamp,
             reply_to: reply ? reply.id : null,
@@ -2334,7 +2518,7 @@
         state.msgs.push(temp);
         renderMessages(true);
 
-        var previewText = isImage(text) ? '📷 Фото' : String(text).slice(0, 70);
+        var previewText = isPhoto(text) ? '📷 Фото' : String(text).slice(0, 70);
 
         roomKey(room).then(function (key) {
             if (!key) return { text: text, quote: reply ? reply.preview : null, preview: previewText };
@@ -2352,6 +2536,7 @@
                 user_name: state.me.name,
                 text: payload.text,
                 preview: payload.preview,
+                thumb: extra.thumb || null,
                 reactions: {},
                 created_at: stamp
             };
@@ -2368,7 +2553,7 @@
                 // старая таблица без новых колонок — отправляем базовый набор полей
                 if (err.status !== 400) throw err;
                 delete body.reply_to; delete body.reply_name; delete body.reply_preview;
-                delete body.preview;
+                delete body.preview; delete body.thumb;
                 return request('/messages', {
                     method: 'POST',
                     headers: { Prefer: 'return=representation' },
@@ -2384,6 +2569,7 @@
                 saved.localKey = temp.localKey;       // тот же DOM-узел: без повторной анимации
                 saved.body = text;
                 saved.replyBody = temp.replyBody;
+                saved.thumbBody = temp.thumbBody;
                 if (state.msgs.some(function (x) { return x.id === saved.id && x !== temp; })) {
                     state.msgs.splice(idx, 1);
                 } else {
@@ -2506,7 +2692,7 @@
 
     function replySnippet(msg) {
         var text = msg.body === undefined ? msg.text : msg.body;
-        if (isImage(text)) return '📷 Фото';
+        if (isPhoto(text)) return '📷 Фото';
         return String(text || '').slice(0, 120);
     }
 
@@ -2802,6 +2988,18 @@
             return;
         }
 
+        // В канале состав подписчиков закрыт: показываем только их число.
+        if (chat.kind === 'channel') {
+            $('pf-av').src = avatarFor(chatDisplayName(chat), chat.room_id);
+            $('pf-name').textContent = chatDisplayName(chat);
+            $('pf-nick').textContent = chat.slug ? '@' + chat.slug : '';
+            $('pf-extra').textContent = (chat.about ? chat.about + ' · ' : '') +
+                plural(chat.subscribers || 0, 'подписчик', 'подписчика', 'подписчиков');
+            $('pf-write').hidden = true;
+            $('profile-modal').classList.add('show');
+            return;
+        }
+
         var ids = (chat.members || []).slice(0, 50);
         var box = $('reactions-list');
         box.innerHTML = '<div class="muted small" style="padding:10px 4px">Загрузка…</div>';
@@ -3007,6 +3205,210 @@
         apply();
     }
 
+    /* ==================================================================
+       УВЕДОМЛЕНИЯ И УСТАНОВКА ПРИЛОЖЕНИЯ
+       ================================================================== */
+
+    function notifyEnabled() {
+        return localStorage.getItem(LS.notify) === 'on' &&
+            typeof Notification !== 'undefined' && Notification.permission === 'granted';
+    }
+
+    function updateNotifyPill() {
+        var pill = $('notify-state');
+        if (!pill) return;
+        if (typeof Notification === 'undefined') {
+            pill.textContent = 'недоступно';
+            pill.className = 'pill';
+            return;
+        }
+        if (Notification.permission === 'denied') {
+            pill.textContent = 'запрещены';
+            pill.className = 'pill bad';
+            return;
+        }
+        var on = notifyEnabled();
+        pill.textContent = on ? 'вкл' : 'выкл';
+        pill.className = 'pill ' + (on ? 'ok' : '');
+    }
+
+    function toggleNotifications() {
+        if (typeof Notification === 'undefined') {
+            toast('Браузер не умеет показывать уведомления');
+            return;
+        }
+        if (notifyEnabled()) {
+            localStorage.setItem(LS.notify, 'off');
+            updateNotifyPill();
+            toast('Уведомления выключены');
+            return;
+        }
+        if (Notification.permission === 'denied') {
+            toast('Разрешите уведомления в настройках браузера');
+            return;
+        }
+        Notification.requestPermission().then(function (result) {
+            if (result === 'granted') {
+                localStorage.setItem(LS.notify, 'on');
+                toast('Уведомления включены');
+                showNotification('WolffMsg', 'Уведомления работают', null, null);
+            } else {
+                toast('Уведомления не разрешены');
+            }
+            updateNotifyPill();
+        });
+    }
+
+    function showNotification(title, body, room, msgId) {
+        var options = {
+            body: body || '',
+            icon: 'assets/icon-192.png',
+            badge: 'assets/icon-192.png',
+            tag: room || 'wolffmsg',
+            renotify: true,
+            data: { room: room, msg: msgId }
+        };
+        var direct = function () {
+            try { new Notification(title, options); } catch (e) { /* нельзя — молчим */ }
+        };
+
+        // Через service worker уведомления показываются и на Android, но если
+        // он ещё не управляет страницей, ждать его нельзя: показываем сразу.
+        if (!navigator.serviceWorker || !navigator.serviceWorker.controller) {
+            direct();
+            return;
+        }
+
+        var done = false;
+        var timer = setTimeout(function () {
+            if (!done) { done = true; direct(); }
+        }, 500);
+
+        navigator.serviceWorker.ready.then(function (reg) {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            reg.showNotification(title, options);
+        }).catch(function () {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            direct();
+        });
+    }
+
+    /* Показываем уведомление о новых сообщениях в чатах, которые сейчас не
+       открыты, и отмечаем счётчик на значке приложения. */
+    function maybeNotify() {
+        var badge = 0;
+        state.chats.forEach(function (c) { badge += c.unread || 0; });
+        try {
+            if (navigator.setAppBadge) {
+                if (badge > 0) navigator.setAppBadge(badge);
+                else if (navigator.clearAppBadge) navigator.clearAppBadge();
+            }
+        } catch (e) { /* не поддерживается */ }
+
+        if (!notifyEnabled()) return;
+        var seen = readJSON(LS.notified, {});
+        var changed = false;
+
+        state.chats.forEach(function (c) {
+            if (!c.ts || !c.unread) return;
+            if (prefFor(c.room_id).muted) return;
+            if (state.activeRoom === c.room_id && !document.hidden) return;
+            if (seen[c.room_id] && seen[c.room_id] >= c.ts) return;
+
+            seen[c.room_id] = c.ts;
+            changed = true;
+            var body = c.preview || 'Новое сообщение';
+            if (CR && CR.isEncrypted(body)) body = 'Новое сообщение';
+            showNotification(chatDisplayName(findChat(c.room_id) || c) || c.title,
+                body, c.room_id, c.lastId);
+        });
+
+        if (changed) writeJSON(LS.notified, seen);
+    }
+
+    /* Переход из уведомления: открыть чат и показать нужное сообщение. */
+    function openFromNotification(room, msgId) {
+        if (!room || !state.me) return;
+        var go = function () {
+            openChat(room);
+            if (msgId) setTimeout(function () { scrollToMessage(msgId); }, 1200);
+        };
+        if (findChat(room)) go();
+        else syncChats().then(go);
+    }
+
+    function setupNotifications() {
+        updateNotifyPill();
+
+        if (navigator.serviceWorker) {
+            navigator.serviceWorker.addEventListener('message', function (event) {
+                var data = event.data || {};
+                if (data.type === 'open-chat') openFromNotification(data.room, data.msg);
+            });
+        }
+
+        var params = new URLSearchParams(location.search);
+        if (params.get('open')) {
+            var room = params.get('open');
+            var msg = params.get('msg');
+            history.replaceState(null, '', location.pathname);
+            setTimeout(function () { openFromNotification(room, msg); }, 600);
+        }
+    }
+
+    /* ---------------------------------------------------------- установка */
+
+    var installPrompt = null;
+
+    function setupInstall() {
+        window.addEventListener('beforeinstallprompt', function (e) {
+            e.preventDefault();
+            installPrompt = e;
+            $('set-install').hidden = false;
+        });
+
+        window.addEventListener('appinstalled', function () {
+            installPrompt = null;
+            $('set-install').hidden = true;
+            toast('Приложение установлено');
+        });
+
+        // На iOS системного диалога нет — показываем инструкцию.
+        var isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+        var standalone = window.matchMedia('(display-mode: standalone)').matches ||
+            navigator.standalone === true;
+        if (isIOS && !standalone) $('set-install').hidden = false;
+    }
+
+    function openInstall() {
+        var isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+        if (installPrompt) {
+            $('install-text').textContent =
+                'Приложение появится на домашнем экране и будет открываться без адресной строки.';
+            $('install-go').hidden = false;
+            $('install-go').onclick = function () {
+                $('install-modal').classList.remove('show');
+                installPrompt.prompt();
+                installPrompt = null;
+            };
+        } else if (isIOS) {
+            $('install-text').textContent =
+                'В Safari нажмите «Поделиться» (квадрат со стрелкой вверх) → ' +
+                '«На экран «Домой»» → «Добавить». Приложение появится на домашнем экране.';
+            $('install-go').hidden = true;
+        } else {
+            $('install-text').textContent =
+                'Откройте меню браузера и выберите «Установить приложение» ' +
+                'или «Добавить на главный экран».';
+            $('install-go').hidden = true;
+        }
+        $('install-modal').classList.add('show');
+    }
+
     /* -------------------------------------------------------------- запуск */
 
     function startApp() {
@@ -3081,8 +3483,7 @@
             var channel = row.getAttribute('data-channel');
             var user = row.getAttribute('data-user');
             if (channel) {
-                if (findChat(channel)) openChat(channel);
-                else joinChannel(channel);
+                previewChannel(channel);
             } else if (user) {
                 $('chat-search').value = '';
                 runSearch('');
@@ -3210,6 +3611,14 @@
                 location.reload();
             });
         });
+        $('set-notify').addEventListener('click', toggleNotifications);
+        $('set-install').addEventListener('click', openInstall);
+        $('install-close').addEventListener('click', function () {
+            $('install-modal').classList.remove('show');
+        });
+        $('install-modal').addEventListener('click', function (e) {
+            if (e.target === this) this.classList.remove('show');
+        });
         $('set-logout').addEventListener('click', logout);
         $('set-delete').addEventListener('click', deleteAccount);
 
@@ -3254,6 +3663,8 @@
         applyMotion();
         bindEvents();
         setupKeyboard();
+        setupInstall();
+        setupNotifications();
         setAuthMode(false);
 
         state.me = normalizeUser(readJSON(LS.user, null));
@@ -3272,6 +3683,7 @@
 
     window.WM = {
         simulateKeyboard: function (px) { applyKeyboardInset(px || 0); },
+        openFromNotification: function (room, msg) { openFromNotification(room, msg); },
         reconnect: reconnect,
         openConnection: openConnection,
         state: state,

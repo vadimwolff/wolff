@@ -69,15 +69,20 @@ await step('канал находится в глобальном поиске',
     assert(text.includes('Подписаться'), 'нет кнопки подписки: ' + text);
 });
 
-await step('подписка открывает канал и показывает записи', async () => {
+await step('канал открывается на просмотр и показывает записи', async () => {
     await reader.page.click('#global-results .f-item[data-channel]');
     await reader.page.waitForSelector('#page-chat.active', { timeout: 20000 });
     await reader.page.waitForFunction(
         () => [...document.querySelectorAll('.bubble.in .text')]
             .some((e) => e.textContent.includes('Первый пост')), null, { timeout: 20000 });
+    const joinVisible = await reader.page.isVisible('#btn-join');
+    assert(joinVisible, 'нет кнопки «Подписаться» — вход в канал подписал сам');
 });
 
-await step('подписчик не может писать в канал', async () => {
+await step('после подписки писать в канал всё равно нельзя', async () => {
+    await reader.page.click('#btn-join');
+    await reader.page.waitForFunction(
+        () => document.getElementById('btn-join').hidden, null, { timeout: 25000 });
     const barHidden = await reader.page.isHidden('#input-bar');
     assert(barHidden, 'подписчику показана строка ввода');
     const note = await reader.page.textContent('#channel-note');

@@ -8,7 +8,13 @@
 <title>WolffMsg</title>
 <link rel="manifest" href="assets/manifest.webmanifest">
 <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
-<link rel="apple-touch-icon" href="assets/icon.svg">
+<link rel="icon" href="assets/icon-192.png" sizes="192x192" type="image/png">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="WolffMsg">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="format-detection" content="telephone=no">
 <link rel="stylesheet" href="assets/styles.css">
 </head>
 <body class="theme-dark">
@@ -142,6 +148,8 @@
             <div class="settings-item" id="set-name"><i>👤</i> Изменить имя</div>
             <div class="settings-item" id="set-pass"><i>🔑</i> Изменить пароль</div>
             <div class="settings-item" id="set-conn"><i>🌐</i> Соединение <span id="conn-state" class="pill">…</span></div>
+            <div class="settings-item" id="set-notify"><i>🔔</i> Уведомления <span id="notify-state" class="pill">выкл</span></div>
+            <div class="settings-item" id="set-install" hidden><i>📲</i> Установить приложение</div>
             <div class="settings-item" id="set-motion"><i>✨</i> Анимации <span id="motion-state" class="pill">вкл</span></div>
             <div class="settings-item" id="set-profile"><i>🪪</i> Мой профиль</div>
             <div class="settings-item" id="set-cache"><i>🧹</i> Очистить локальные данные</div>
@@ -253,6 +261,17 @@
         <h3>Реакции</h3>
         <div id="reactions-list" class="reactions-list"></div>
         <div class="modal-item cancel" id="reactions-close">Закрыть</div>
+    </div>
+</div>
+
+<div id="install-modal" class="modal-overlay">
+    <div class="modal-sheet">
+        <h3>Установить приложение</h3>
+        <p class="muted small" id="install-text"></p>
+        <div class="sheet-row">
+            <button type="button" class="btn-flat" id="install-close">Понятно</button>
+            <button type="button" class="btn-primary" id="install-go" hidden>Установить</button>
+        </div>
     </div>
 </div>
 

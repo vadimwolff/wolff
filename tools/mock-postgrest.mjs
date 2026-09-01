@@ -46,10 +46,12 @@ const db = {
     chats: [],
     messages: [],
     room_reads: [],
-    room_keys: []
+    room_keys: [],
+    attachments: []
 };
 
 let messageSeq = 1;
+let attachmentSeq = 1;
 
 const hash = (s) => 'bcrypt$' + crypto.createHash('sha256').update(String(s)).digest('hex');
 
@@ -369,7 +371,7 @@ function handleApi(req, res, rest, body) {
         if (parts[0] === 'rpc' && newRpcs.includes(parts[1])) {
             return json(res, 404, { code: 'PGRST202', message: 'function not found' });
         }
-        if (parts[0] === 'room_keys') {
+        if (parts[0] === 'room_keys' || parts[0] === 'attachments') {
             return json(res, 404, { code: 'PGRST205', message: 'relation not found' });
         }
         const allowed = OLD_COLUMNS[parts[0]];
@@ -420,6 +422,10 @@ function handleApi(req, res, rest, body) {
 
         const saved = rows.map((row) => {
             const rec = { ...row };
+            if (name === 'attachments') {
+                rec.id = attachmentSeq++;
+                rec.created_at = rec.created_at || new Date().toISOString();
+            }
             if (name === 'messages') {
                 rec.id = messageSeq++;
                 rec.created_at = rec.created_at || new Date().toISOString();
