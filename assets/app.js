@@ -869,16 +869,20 @@
     }
 
     function rpcRegister(nick, pass, name, bundle) {
-        var args = { p_nickname: nick, p_password: pass, p_name: name };
-        if (bundle) {
-            args.p_public_key = bundle.public_key;
-            args.p_enc_private_key = bundle.enc_private_key;
-            args.p_key_salt = bundle.key_salt;
-        }
+        // Полный набор параметров передаём всегда, даже без ключей: если в базе
+        // остались обе версии функции, такой вызов однозначно выбирает новую.
+        var args = {
+            p_nickname: nick,
+            p_password: pass,
+            p_name: name,
+            p_public_key: bundle ? bundle.public_key : null,
+            p_enc_private_key: bundle ? bundle.enc_private_key : null,
+            p_key_salt: bundle ? bundle.key_salt : null
+        };
         return rpc('wm_register', args)
             .catch(function (err) {
                 // база прошлой версии знает функцию только с тремя параметрами
-                if (!bundle || !missingRelation(err)) throw err;
+                if (!missingRelation(err)) throw err;
                 return rpc('wm_register', { p_nickname: nick, p_password: pass, p_name: name });
             })
             .then(function (res) {
@@ -1037,7 +1041,16 @@
                 rpc('wm_set_password', {
                     p_nickname: state.me.nickname,
                     p_old_password: oldPass,
-                    p_new_password: pass
+                    p_new_password: pass,
+                    p_enc_private_key: null,
+                    p_key_salt: null
+                }).catch(function (err) {
+                    if (!missingRelation(err)) throw err;
+                    return rpc('wm_set_password', {
+                        p_nickname: state.me.nickname,
+                        p_old_password: oldPass,
+                        p_new_password: pass
+                    });
                 }).then(function (res) {
                     if (res && res.ok) return true;
                     throw WMError(res && res.error === 'weak_password'

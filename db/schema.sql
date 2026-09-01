@@ -207,6 +207,35 @@ from public.messages m
 order by m.room_id, m.created_at desc;
 
 -- ============================================================================
+--  Удаление прежних версий функций.
+--
+--  create or replace не заменяет функцию, у которой изменился набор
+--  параметров, — рядом появляется вторая. Тогда PostgREST не может выбрать и
+--  отвечает «не удалось выбрать лучшую функцию-кандидат». Поэтому перед
+--  созданием сносим все прежние варианты по имени.
+-- ============================================================================
+
+do $$
+declare
+    r record;
+begin
+    for r in
+        select p.oid::regprocedure as signature
+          from pg_proc p
+          join pg_namespace n on n.oid = p.pronamespace
+         where n.nspname = 'public'
+           and p.proname in ('wm_register', 'wm_login', 'wm_set_password', 'wm_set_keys',
+                             'wm_create_channel', 'wm_join_chat', 'wm_leave_chat',
+                             'wm_search', 'wm_public_user', 'wm_user_keys',
+                             'wm_guard_channel_post')
+    loop
+        execute 'drop function if exists ' || r.signature || ' cascade';
+    end loop;
+exception when others then
+    raise notice 'Не удалось удалить прежние версии функций: %', sqlerrm;
+end $$;
+
+-- ============================================================================
 --  Функции входа и регистрации.
 --  Пароли хранятся только в виде bcrypt-хеша; клиент их не читает.
 --  search_path включает extensions — там в Supabase живёт pgcrypto.

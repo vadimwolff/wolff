@@ -60,3 +60,22 @@ from expected e
 order by
     case when e.kind = 'функция' then 1 else 2 end,
     e.name;
+
+-- ----------------------------------------------------------------------------
+--  Дубли функций: если у одной функции осталось несколько версий с разным
+--  набором параметров, PostgREST не может выбрать и отвечает ошибкой
+--  «не удалось выбрать лучшую функцию-кандидат». Лечится повторным запуском
+--  db/schema.sql — он удаляет прежние версии.
+-- ----------------------------------------------------------------------------
+
+select
+    p.proname                              as "функция",
+    count(*)                               as "версий",
+    string_agg(p.oid::regprocedure::text, '  |  ') as "подписи",
+    case when count(*) > 1 then 'ДУБЛЬ — выполните schema.sql заново' else 'в порядке' end
+                                           as "состояние"
+from pg_proc p
+join pg_namespace n on n.oid = p.pronamespace
+where n.nspname = 'public' and p.proname like 'wm\_%'
+group by p.proname
+order by count(*) desc, p.proname;
