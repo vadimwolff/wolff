@@ -132,7 +132,14 @@ body.theme-fog {
 :root {
     --safe-top: env(safe-area-inset-top, 0px);
     --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --kb: 0px;                       /* высота клавиатуры, ставится из JS */
     --transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Когда клавиатура открыта, нижний отступ безопасной зоны не нужен:
+   его место занимает сама клавиатура. */
+body.keyboard-open {
+    --safe-bottom: 0px;
 }
 
 /* ------------------------------ база ------------------------------ */
@@ -167,11 +174,17 @@ button, input, textarea {
 
 .page {
     position: fixed;
-    inset: 0;
+    top: 0;
+    left: 0;
+    right: 0;
+    /* --kb — высота экранной клавиатуры, её измеряет visualViewport.
+       Так нижняя панель всегда остаётся над клавиатурой, а не под ней. */
+    bottom: var(--kb, 0px);
     display: none;
     flex-direction: column;
     background: var(--bg);
     z-index: 1;
+    transition: bottom 0.18s ease-out;
 }
 
 .page.active {
@@ -316,7 +329,7 @@ header b { font-size: 19px; letter-spacing: -0.4px; }
     border: none;
     background: var(--card);
     color: var(--text);
-    font-size: 15px;
+    font-size: 16px;
 }
 
 .search-row input:focus { outline: 1px solid var(--accent); }
@@ -808,7 +821,10 @@ header b { font-size: 19px; letter-spacing: -0.4px; }
 
 .modal-overlay {
     position: fixed;
-    inset: 0;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: var(--kb, 0px);
     background: rgba(0, 0, 0, 0.7);
     z-index: 1000;
     display: none;
@@ -1311,6 +1327,7 @@ body.no-motion *::after {
     position: absolute;
     right: 14px;
     bottom: calc(var(--safe-bottom) + 84px);
+    transition: bottom 0.18s ease-out;
     width: 46px;
     height: 46px;
     border-radius: 50%;
@@ -1453,3 +1470,20 @@ body.no-motion *::after {
 #crypto-off { width: 100%; margin-bottom: 8px; }
 #crypto-off[hidden] { display: none; }
 #crypto-code-box[hidden] { display: none; }
+
+/* обсуждение под записью канала */
+.post-foot {
+    margin-top: 8px;
+    padding-top: 7px;
+    border-top: 1px solid rgba(128, 128, 128, 0.22);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.bubble.out .post-foot { color: var(--text-out); opacity: 0.85; }
+.post-foot:active { opacity: 0.6; }

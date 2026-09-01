@@ -242,7 +242,7 @@ await step('в канале список авторов реакций не от
     await anna.page.click('#btn-send');
     await anna.page.waitForSelector('.bubble.out:not(.pending)', { timeout: 20000 });
 
-    await anna.page.click('.bubble.out');
+    await anna.page.click('.bubble.out .text');       // мимо ссылки на обсуждение
     await anna.page.waitForSelector('.msg-menu', { timeout: 10000 });
     const hasWho = await anna.page.locator('.msg-menu .menu-item[data-act="who"]').count();
     assert(hasWho === 0, 'в канале предложено смотреть авторов реакций');

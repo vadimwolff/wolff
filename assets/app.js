@@ -58,6 +58,8 @@
         reads: {},
         keys: {},               // room_id -> CryptoKey (ключ комнаты)
         keyTasks: {},           // room_id -> Promise, чтобы не запрашивать ключ дважды
+        virtual: {},            // комнаты обсуждений под записями канала
+        commentCounts: {},      // id записи -> число комментариев
         identity: null,         // { publicKey (base64), privateKey (CryptoKey) }
         hasKeyStore: true,      // есть ли таблица room_keys
         selectedRoom: null,
@@ -77,6 +79,7 @@
         chatTimer: null,
         searchTimer: null,
         busy: false,
+        kbManual: false,
         firstChatPaint: true,
         serverChats: true,
         hasPreviews: true,
@@ -551,7 +554,7 @@
     /* Ключ чата: берём готовый, расшифровываем свою копию или создаём новый. */
     function ensureRoomKey(room) {
         var chat = findChat(room);
-        if (!chat || chat.kind === 'channel') return Promise.resolve(null);
+        if (!chat || chat.kind === 'channel' || chat.kind === 'comments') return Promise.resolve(null);
         if (!cryptoReady() || !state.hasKeyStore) return Promise.resolve(null);
 
         return request('/room_keys?room_id=eq.' + q(room) + '&user_id=eq.' + q(state.me.id) +
@@ -1196,7 +1199,7 @@
     }
 
     function persistChats() {
-        writeJSON(LS.chats, state.chats.map(function (c) {
+        writeJSON(LS.chats, state.chats.filter(function (c) { return c.kind !== 'comments'; }).map(function (c) {
             return {
                 room: c.room_id, name: c.name, kind: c.kind, members: c.members,
                 slug: c.slug, owner_id: c.owner_id, subscribers: c.subscribers
@@ -1739,7 +1742,56 @@
     /* ------------------------------------------------------------ окно чата */
 
     function findChat(room) {
+        if (state.virtual[room]) return state.virtual[room];
         return state.chats.filter(function (c) { return c.room_id === room; })[0] || null;
+    }
+
+    function isCommentsRoom(chat) {
+        return !!chat && chat.kind === 'comments';
+    }
+
+    /* Обсуждение под записью канала: отдельная комната post_<id>.
+       Писать в неё может любой — это не сам канал. */
+    function openComments(postId) {
+        var parent = state.activeChat;
+        if (!parent) return;
+        var msg = state.msgs.filter(function (m) { return m.id === String(postId); })[0];
+        var room = 'post_' + postId;
+
+        state.virtual[room] = {
+            room_id: room,
+            kind: 'comments',
+            name: 'Комментарии',
+            members: [state.me.id],
+            parentRoom: parent.room_id,
+            parentTitle: chatDisplayName(parent),
+            postPreview: msg ? replySnippet(msg) : ''
+        };
+        openChat(room);
+    }
+
+    /* Сколько комментариев под каждой записью канала. */
+    function loadCommentCounts(room, ids) {
+        if (!ids.length) return Promise.resolve(false);
+        var list = 'in.(' + ids.map(function (id) { return '"post_' + String(id).replace(/"/g, '') + '"'; }).join(',') + ')';
+        return request('/messages?room_id=' + q(list) + '&select=room_id&limit=1000')
+            .then(function (rows) {
+                var counts = {};
+                (rows || []).forEach(function (r) {
+                    var id = String(r.room_id).slice(5);
+                    counts[id] = (counts[id] || 0) + 1;
+                });
+                var changed = false;
+                ids.forEach(function (id) {
+                    var next = counts[id] || 0;
+                    if (state.commentCounts[id] !== next) {
+                        state.commentCounts[id] = next;
+                        changed = true;
+                    }
+                });
+                return changed;
+            })
+            .catch(function () { return false; });
     }
 
     function isMember(chat) {
@@ -1748,7 +1800,7 @@
 
     function canPost(chat) {
         if (!chat) return false;
-        if (chat.kind !== 'channel') return true;
+        if (chat.kind !== 'channel') return true;          // обсуждения открыты всем
         return !chat.owner_id || chat.owner_id === state.me.id;
     }
 
@@ -1760,6 +1812,19 @@
         $('chat-lock').hidden = !state.keys[chat.room_id];
 
         var sub = '';
+        if (isCommentsRoom(chat)) {
+            $('chat-lock').hidden = true;
+            $('chat-subtitle').textContent = chat.postPreview
+                ? 'к записи: ' + chat.postPreview : 'обсуждение записи';
+            $('act-invite').hidden = true;
+            $('act-crypto').hidden = true;
+            $('act-leave').hidden = true;
+            $('act-delete').hidden = true;
+            $('act-clear').hidden = true;
+            $('input-bar').hidden = false;
+            $('channel-bar').hidden = true;
+            return;
+        }
         if (chat.kind === 'channel') {
             sub = plural(chat.subscribers || (chat.members || []).length,
                 'подписчик', 'подписчика', 'подписчиков');
@@ -1860,6 +1925,17 @@
     }
 
     function closeChat() {
+        var current = state.activeChat;
+        if (isCommentsRoom(current) && current.parentRoom) {
+            stopChatTimer();
+            closePicker();
+            var back = current.parentRoom;
+            state.activeRoom = null;
+            state.activeChat = null;
+            state.msgs = [];
+            openChat(back);
+            return;
+        }
         stopChatTimer();
         closePicker();
         state.activeRoom = null;
@@ -1936,7 +2012,15 @@
                 });
         }).then(function (added) {
             if (state.activeRoom !== room) return;
-            return decodeAll(state.msgs, room).then(function () {
+            var chat = findChat(room);
+            var counts = (chat && chat.kind === 'channel')
+                ? loadCommentCounts(room, state.msgs.filter(function (m) { return !m.pending; })
+                    .slice(-40).map(function (m) { return m.id; }))
+                : Promise.resolve(false);
+
+            return counts.then(function () {
+                return decodeAll(state.msgs, room);
+            }).then(function () {
                 return loadReads(room);
             }).then(function () {
                 if (state.activeRoom !== room) return;
@@ -2021,7 +2105,8 @@
             m.failed ? 1 : 0,
             m.user_name || '',
             m.reply_to || '',
-            m.replyBody === undefined ? (m.reply_preview || '') : m.replyBody
+            m.replyBody === undefined ? (m.reply_preview || '') : m.replyBody,
+            state.commentCounts[m.id] === undefined ? '' : state.commentCounts[m.id]
         ].join('\u0001');
     }
 
@@ -2063,7 +2148,15 @@
                 '</small></div></div>';
         }
 
-        return author + quote + '<div class="text">' + content + '</div>' + rHtml +
+        var foot = '';
+        if (state.activeChat && state.activeChat.kind === 'channel' && !m.pending) {
+            var n = state.commentCounts[m.id] || 0;
+            foot = '<div class="post-foot" data-comments="' + esc(m.id) + '">💬 ' +
+                (n ? esc(plural(n, 'комментарий', 'комментария', 'комментариев'))
+                   : 'Комментировать') + '</div>';
+        }
+
+        return author + quote + '<div class="text">' + content + '</div>' + rHtml + foot +
             '<div class="bubble-meta">' + esc(fmtTime(m.created_at)) +
             (out ? '<span class="status-icon ' + statusClass(m) + '">' + CHECK_SVG + '</span>' : '') +
             '</div>';
@@ -2108,8 +2201,8 @@
         if (skeleton) box.innerHTML = '';
 
         var wasAtBottom = isAtBottom();
-        var isGroup = state.activeChat &&
-            (state.activeChat.kind === 'group' || state.activeChat.kind === 'channel');
+        // в группах, каналах и обсуждениях показываем автора входящего сообщения
+        var isGroup = state.activeChat && state.activeChat.kind !== 'dm';
 
         var desired = [];
         var lastDay = '';
@@ -2835,6 +2928,72 @@
         el.style.height = Math.min(el.scrollHeight, 120) + 'px';
     }
 
+    /* ==================================================================
+       ЭКРАННАЯ КЛАВИАТУРА
+
+       На телефонах клавиатура перекрывает нижнюю часть страницы. Замеряем её
+       через visualViewport и поднимаем интерфейс ровно на эту высоту, чтобы
+       поле ввода и кнопки всегда оставались видимыми.
+       ================================================================== */
+
+    /* Ручная подстановка высоты клавиатуры: нужна для проверки вёрстки на
+       десктопе, где настоящей клавиатуры нет. */
+    var applyKeyboardInset = function (px) {
+        state.kbManual = px > 0;
+        document.documentElement.style.setProperty('--kb', px + 'px');
+        document.body.classList.toggle('keyboard-open', px > 0);
+    };
+
+    function setupKeyboard() {
+        var vv = window.visualViewport;
+        if (!vv) return;
+
+        var lastHeight = 0;
+
+        function apply() {
+            if (state.kbManual) return;          // включён ручной режим отладки
+            // высота, которую занимает клавиатура снизу окна
+            var hidden = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+            var kb = hidden > 90 ? Math.round(hidden) : 0;   // мелкие расхождения — не клавиатура
+
+            if (kb !== lastHeight) {
+                lastHeight = kb;
+                document.documentElement.style.setProperty('--kb', kb + 'px');
+                document.body.classList.toggle('keyboard-open', kb > 0);
+
+                // когда клавиатура открылась, показываем конец переписки
+                if (kb > 0 && state.activeRoom) {
+                    setTimeout(function () {
+                        var box = $('msg-list');
+                        if (box && isAtBottom()) box.scrollTop = box.scrollHeight;
+                        updateScrollPill();
+                    }, 60);
+                }
+            }
+        }
+
+        applyKeyboardInset = function (px) {
+            state.kbManual = px > 0;
+            lastHeight = px;
+            document.documentElement.style.setProperty('--kb', px + 'px');
+            document.body.classList.toggle('keyboard-open', px > 0);
+        };
+
+        vv.addEventListener('resize', apply);
+        vv.addEventListener('scroll', apply);
+        window.addEventListener('orientationchange', function () { setTimeout(apply, 250); });
+
+        // при фокусе в поле ввода докручиваем список к последнему сообщению
+        $('m-input').addEventListener('focus', function () {
+            setTimeout(function () {
+                var box = $('msg-list');
+                if (box && isAtBottom()) box.scrollTop = box.scrollHeight;
+            }, 220);
+        });
+
+        apply();
+    }
+
     /* -------------------------------------------------------------- запуск */
 
     function startApp() {
@@ -2947,6 +3106,13 @@
             if (author) {
                 e.stopPropagation();
                 openProfile(author.getAttribute('data-author'));
+                return;
+            }
+
+            var post = e.target.closest('[data-comments]');
+            if (post) {
+                e.stopPropagation();
+                openComments(post.getAttribute('data-comments'));
                 return;
             }
 
@@ -3074,6 +3240,7 @@
         setTheme(localStorage.getItem(LS.theme) || 'dark');
         applyMotion();
         bindEvents();
+        setupKeyboard();
         setAuthMode(false);
 
         state.me = normalizeUser(readJSON(LS.user, null));
@@ -3091,6 +3258,7 @@
     }
 
     window.WM = {
+        simulateKeyboard: function (px) { applyKeyboardInset(px || 0); },
         reconnect: reconnect,
         openConnection: openConnection,
         state: state,
