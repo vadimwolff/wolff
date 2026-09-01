@@ -30,7 +30,9 @@
         code: 'WM_CODE_',
         identity: 'WM_IDENTITY',
         notify: 'WM_NOTIFY',
-        notified: 'WM_NOTIFIED'
+        notified: 'WM_NOTIFIED',
+        recent: 'WM_RECENT',
+        sound: 'WM_SOUND'
     };
 
     var THEMES = [
@@ -68,6 +70,7 @@
         virtual: {},            // комнаты обсуждений под записями канала
         commentCounts: {},      // id записи -> число комментариев
         identity: null,         // { publicKey (base64), privateKey (CryptoKey) }
+        vault: null,            // { wrapped, salt } — закрытый ключ под паролем
         hasKeyStore: true,      // есть ли таблица room_keys
         selectedRoom: null,
         pickerOpen: null,
@@ -79,14 +82,18 @@
         registerMode: false,
         page: 'auth',
         search: '',
+        searchMode: false,      // открыт ли экран поиска
         globalResults: null,
+        msgResults: null,       // найденное в загруженной переписке
         listSig: '',
         globalSig: '',
+        msgSig: '',
         listTimer: null,
         chatTimer: null,
         searchTimer: null,
         busy: false,
         kbManual: false,
+        installTab: 'desktop',
         firstChatPaint: true,
         serverChats: true,
         hasPreviews: true,
@@ -219,7 +226,7 @@
     function candidates() {
         var list = [];
         var custom = localStorage.getItem(LS.api);
-        if (custom) list.push({ url: custom.replace(/\/+$/, ''), label: 'Ваш адрес', custom: true });
+        if (custom) list.push({ url: custom.replace(/\/+$/, ''), label: 'Ваш канал связи', custom: true });
         CFG.endpoints.forEach(function (e) {
             var url = endpointUrl(e.url);
             if (!list.some(function (x) { return x.url === url; })) list.push({ url: url, label: e.label });
@@ -490,18 +497,108 @@
         return !!(CR && CR.available() && state.identity && state.identity.privateKey);
     }
 
-    function saveIdentity(identity) {
+    /* Хранилище ключей.
+
+       Закрытый ключ лежит в собственной базе браузера как «неизвлекаемый»
+       объект: расшифровать им можно, а выгрузить его содержимое нельзя — ни
+       расширению, ни постороннему коду. Рядом хранится копия ключа,
+       зашифрованная паролем: она нужна только для смены пароля и без пароля
+       бесполезна. */
+
+    var IDB_NAME = 'wolffmsg';
+    var IDB_STORE = 'keys';
+
+    function idb() {
+        if (!window.indexedDB) return Promise.reject(new Error('no_idb'));
+        return new Promise(function (resolve, reject) {
+            var req = indexedDB.open(IDB_NAME, 1);
+            req.onupgradeneeded = function () {
+                if (!req.result.objectStoreNames.contains(IDB_STORE)) req.result.createObjectStore(IDB_STORE);
+            };
+            req.onsuccess = function () { resolve(req.result); };
+            req.onerror = function () { reject(req.error || new Error('idb')); };
+        });
+    }
+
+    function idbPut(key, value) {
+        return idb().then(function (db) {
+            return new Promise(function (resolve, reject) {
+                var tx = db.transaction(IDB_STORE, 'readwrite');
+                tx.objectStore(IDB_STORE).put(value, key);
+                tx.oncomplete = function () { resolve(true); };
+                tx.onerror = function () { reject(tx.error || new Error('idb_put')); };
+            });
+        });
+    }
+
+    function idbGet(key) {
+        return idb().then(function (db) {
+            return new Promise(function (resolve, reject) {
+                var tx = db.transaction(IDB_STORE, 'readonly');
+                var req = tx.objectStore(IDB_STORE).get(key);
+                req.onsuccess = function () { resolve(req.result || null); };
+                req.onerror = function () { reject(req.error || new Error('idb_get')); };
+            });
+        });
+    }
+
+    function idbDelete(key) {
+        return idb().then(function (db) {
+            return new Promise(function (resolve) {
+                var tx = db.transaction(IDB_STORE, 'readwrite');
+                tx.objectStore(IDB_STORE).delete(key);
+                tx.oncomplete = function () { resolve(true); };
+                tx.onerror = function () { resolve(false); };
+            });
+        }).catch(function () { return false; });
+    }
+
+    /* vault — { wrapped, salt }: закрытый ключ под паролем, нужен при его смене. */
+    function saveIdentity(identity, vault) {
         state.identity = identity;
-        return CR.exportPrivateJwk(identity.privateKey).then(function (jwk) {
-            writeJSON(LS.identity, { publicKey: identity.publicKey, privateJwk: jwk });
-        }).catch(function () { /* не критично: ключ переживёт сессию в памяти */ });
+        if (vault && vault.wrapped && vault.salt) state.vault = vault;
+
+        var store = function (privateKey) {
+            return idbPut('identity', {
+                publicKey: identity.publicKey,
+                privateKey: privateKey,
+                vault: state.vault || null
+            });
+        };
+
+        // В хранилище кладём неизвлекаемую копию; извлекаемая остаётся только
+        // в памяти этой вкладки, пока она нужна для выдачи ключей.
+        return CR.hardenPrivate(identity.privateKey)
+            .then(store)
+            .catch(function () { return store(identity.privateKey).catch(function () { /* ключ живёт в памяти */ }); })
+            .then(function () { localStorage.removeItem(LS.identity); });
     }
 
     function loadIdentity() {
+        if (!CR || !CR.available()) return Promise.resolve(null);
+
+        return idbGet('identity').catch(function () { return null; }).then(function (rec) {
+            if (rec && rec.privateKey) {
+                state.identity = { publicKey: rec.publicKey, privateKey: rec.privateKey };
+                state.vault = rec.vault || null;
+                return state.identity;
+            }
+            return migrateIdentity();
+        }).catch(function () { return null; });
+    }
+
+    /* Ключ прошлой версии лежал в localStorage открытым текстом — переносим
+       его в защищённое хранилище и стираем старую копию. */
+    function migrateIdentity() {
         var stored = readJSON(LS.identity, null);
-        if (!stored || !stored.privateJwk || !CR || !CR.available()) return Promise.resolve(null);
-        return CR.importPrivateJwk(stored.privateJwk).then(function (priv) {
+        if (!stored || !stored.privateJwk) return null;
+        return CR.importPrivateJwk(stored.privateJwk, false).then(function (priv) {
             state.identity = { publicKey: stored.publicKey, privateKey: priv };
+            return idbPut('identity', {
+                publicKey: stored.publicKey, privateKey: priv, vault: null
+            }).catch(function () { /* останется в памяти */ });
+        }).then(function () {
+            localStorage.removeItem(LS.identity);
             return state.identity;
         }).catch(function () { return null; });
     }
@@ -513,9 +610,10 @@
 
         if (keys && keys.enc_private_key && keys.key_salt) {
             return CR.passwordKey(password, keys.key_salt)
-                .then(function (pk) { return CR.unwrapPrivate(keys.enc_private_key, pk); })
+                .then(function (pk) { return CR.unwrapPrivate(keys.enc_private_key, pk, false); })
                 .then(function (priv) {
-                    return saveIdentity({ publicKey: keys.public_key, privateKey: priv });
+                    return saveIdentity({ publicKey: keys.public_key, privateKey: priv },
+                        { wrapped: keys.enc_private_key, salt: keys.key_salt });
                 })
                 .then(function () { return state.identity; })
                 .catch(function () { return null; });      // пароль сменили на другом устройстве
@@ -533,7 +631,7 @@
         }).then(function (pk) {
             return CR.wrapPrivate(identity.privateKey, pk);
         }).then(function (wrapped) {
-            return saveIdentity(identity).then(function () {
+            return saveIdentity(identity, { wrapped: wrapped, salt: salt }).then(function () {
                 return {
                     public_key: identity.publicKey,
                     enc_private_key: wrapped,
@@ -773,7 +871,14 @@
         }
     }
 
+    /* Системная кнопка «назад» сначала закрывает окно или поиск и только
+       потом уводит с экрана — так же, как ожидается на телефоне. */
     window.addEventListener('popstate', function () {
+        var keep = function () {
+            try { history.pushState({ wm: state.page }, ''); } catch (e) { /* no-op */ }
+        };
+        if (closeTopModal()) { keep(); return; }
+        if (state.searchMode) { closeSearch(); keep(); return; }
         if (state.page === 'chat') closeChat();
         else if (state.page === 'settings') showPage('main');
     });
@@ -814,6 +919,12 @@
         if (!nick || !pass) { $('auth-status').textContent = 'Заполните никнейм и пароль'; return; }
         if (!/^[a-z0-9_.]{3,32}$/.test(nick)) {
             $('auth-status').textContent = 'Ник: 3–32 символа, латиница, цифры, _ и .';
+            return;
+        }
+        // Пароль защищает и переписку: из него выводится ключ, которым
+        // зашифрован закрытый ключ. Для новых аккаунтов минимум выше.
+        if (state.registerMode && pass.length < 8) {
+            $('auth-status').textContent = 'Пароль от 8 символов — им шифруется ваша переписка';
             return;
         }
         if (pass.length < 4) { $('auth-status').textContent = 'Пароль от 4 символов'; return; }
@@ -970,13 +1081,14 @@
             'включая коды шифрования чатов.', 'Выйти', function () {
             stopTimers();
             state.identity = null;
+            state.vault = null;
             state.keys = {};
             try {
                 Object.keys(localStorage).forEach(function (k) {
                     if (k.indexOf('WM_') === 0 && k !== LS.theme && k !== LS.api) localStorage.removeItem(k);
                 });
             } catch (e) { /* no-op */ }
-            location.reload();
+            idbDelete('identity').then(function () { location.reload(); });
         });
     }
 
@@ -990,8 +1102,9 @@
                     .then(function () { return request('/profiles?id=eq.' + q(id), { method: 'DELETE' }); })
                     .then(function () {
                         localStorage.clear();
-                        location.reload();
+                        return idbDelete('identity');
                     })
+                    .then(function () { location.reload(); })
                     .catch(function (e) { toast(e.message || 'Не удалось удалить аккаунт'); });
             });
     }
@@ -1055,39 +1168,66 @@
         });
     }
 
+    /* Смена пароля перешифровывает закрытый ключ: иначе на другом устройстве
+       он больше не открылся бы, а вся прежняя переписка стала бы нечитаемой. */
+    function rewrapPrivateKey(oldPass, newPass) {
+        var vault = state.vault;
+        if (!CR || !CR.available() || !vault || !vault.wrapped || !vault.salt) {
+            return Promise.resolve(null);
+        }
+        var salt = CR.randomSalt();
+        var priv;
+        return CR.passwordKey(oldPass, vault.salt)
+            .then(function (k) { return CR.unwrapPrivate(vault.wrapped, k, true); })
+            .then(function (key) { priv = key; return CR.passwordKey(newPass, salt); })
+            .then(function (nk) { return CR.wrapPrivate(priv, nk); })
+            .then(function (wrapped) { return { enc_private_key: wrapped, key_salt: salt }; })
+            .catch(function () { return null; });
+    }
+
     function changePass() {
         promptBox('Смена пароля', 'Введите текущий пароль', '', function (oldPass) {
             if (!oldPass) return;
-            promptBox('Смена пароля', 'Новый пароль, минимум 4 символа', '', function (val) {
+            promptBox('Смена пароля', 'Новый пароль, минимум 8 символов', '', function (val) {
                 var pass = val.trim();
-                if (pass.length < 4) { toast('Слишком короткий пароль'); return; }
+                if (pass.length < 8) { toast('Пароль должен быть от 8 символов'); return; }
 
-                rpc('wm_set_password', {
-                    p_nickname: state.me.nickname,
-                    p_old_password: oldPass,
-                    p_new_password: pass,
-                    p_enc_private_key: null,
-                    p_key_salt: null
-                }).catch(function (err) {
-                    if (!missingRelation(err)) throw err;
+                rewrapPrivateKey(oldPass, pass).then(function (bundle) {
                     return rpc('wm_set_password', {
                         p_nickname: state.me.nickname,
                         p_old_password: oldPass,
-                        p_new_password: pass
-                    });
-                }).then(function (res) {
-                    if (res && res.ok) return true;
-                    throw WMError(res && res.error === 'weak_password'
-                        ? 'Слишком короткий пароль' : 'Текущий пароль неверен');
-                }).catch(function (err) {
-                    if (!missingRelation(err)) throw err;
-                    return request('/profiles?nickname=eq.' + q(state.me.nickname) +
-                        '&password=eq.' + q(oldPass) + '&select=id&limit=1')
-                        .then(function (rows) {
-                            if (!rows || !rows.length) throw WMError('Текущий пароль неверен');
-                            return request('/profiles?id=eq.' + q(state.me.id),
-                                { method: 'PATCH', body: { password: pass } });
+                        p_new_password: pass,
+                        p_enc_private_key: bundle ? bundle.enc_private_key : null,
+                        p_key_salt: bundle ? bundle.key_salt : null
+                    }).catch(function (err) {
+                        if (!missingRelation(err)) throw err;
+                        return rpc('wm_set_password', {
+                            p_nickname: state.me.nickname,
+                            p_old_password: oldPass,
+                            p_new_password: pass
                         });
+                    }).then(function (res) {
+                        if (!res || !res.ok) {
+                            throw WMError(res && res.error === 'weak_password'
+                                ? 'Слишком короткий пароль' : 'Текущий пароль неверен');
+                        }
+                        // Ключ на сервере перешифрован — запоминаем и у себя.
+                        if (bundle && state.identity) {
+                            saveIdentity(state.identity, {
+                                wrapped: bundle.enc_private_key, salt: bundle.key_salt
+                            });
+                        }
+                        return true;
+                    }).catch(function (err) {
+                        if (!missingRelation(err)) throw err;
+                        return request('/profiles?nickname=eq.' + q(state.me.nickname) +
+                            '&password=eq.' + q(oldPass) + '&select=id&limit=1')
+                            .then(function (rows) {
+                                if (!rows || !rows.length) throw WMError('Текущий пароль неверен');
+                                return request('/profiles?id=eq.' + q(state.me.id),
+                                    { method: 'PATCH', body: { password: pass } });
+                            });
+                    });
                 }).then(function () { toast('Пароль изменён'); })
                     .catch(function (e) { toast(e.message || 'Не удалось изменить пароль'); });
             });
@@ -1282,7 +1422,45 @@
 
     /* ------------------------------------------------------------- чаты */
 
+    /* ------------------------------------------------------------ избранное
+
+       Личный раздел человека: комната, в которой он единственный участник.
+       Ключ комнаты зашифрован только его собственным ключом, поэтому записи
+       из «Избранного» не может прочитать никто, включая сервер. */
+
+    function savedRoom() {
+        return state.me ? 'fav_' + state.me.id : null;
+    }
+
+    function isSaved(chat) {
+        return !!chat && chat.kind === 'saved';
+    }
+
+    /* Раздел создаётся один раз и дальше приходит вместе с остальными чатами. */
+    function ensureSaved() {
+        var room = savedRoom();
+        if (!room || findChat(room)) return Promise.resolve();
+
+        var chat = {
+            room_id: room,
+            name: 'Избранное',
+            kind: 'saved',
+            members: [state.me.id]
+        };
+        state.chats.push(chat);
+        renderChatList();
+        return upsertChat(chat).catch(function () { /* появится при следующем запуске */ });
+    }
+
+    function openSaved() {
+        closePlus();
+        var room = savedRoom();
+        if (!room) return;
+        ensureSaved().then(function () { openChat(room); });
+    }
+
     function chatDisplayName(chat) {
+        if (chat.kind === 'saved') return 'Избранное';
         if (chat.kind === 'channel') return chat.name || ('@' + (chat.slug || 'канал'));
         if (chat.kind === 'group') return chat.name || 'Группа';
         var other = (chat.members || []).filter(function (m) { return m !== state.me.id; })[0];
@@ -1291,7 +1469,16 @@
         return chat.name || 'Чат';
     }
 
+    var SAVED_AVATAR = 'data:image/svg+xml;utf8,' + encodeURIComponent(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96">' +
+        '<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">' +
+        '<stop offset="0" stop-color="#f0b429"/><stop offset="1" stop-color="#e07b39"/>' +
+        '</linearGradient></defs>' +
+        '<rect width="96" height="96" rx="48" fill="url(#g)"/>' +
+        '<path d="M34 26h28a4 4 0 0 1 4 4v42l-18-12-18 12V30a4 4 0 0 1 4-4z" fill="#fff"/></svg>');
+
     function chatAvatar(chat) {
+        if (chat.kind === 'saved') return SAVED_AVATAR;
         if (chat.kind === 'dm') {
             var other = (chat.members || []).filter(function (m) { return m !== state.me.id; })[0];
             var p = other && state.profiles[other];
@@ -1309,7 +1496,8 @@
             byRoom[c.room] = {
                 room_id: c.room,
                 name: c.name || '',
-                kind: c.kind || (String(c.room).indexOf('group_') === 0 ? 'group' : 'dm'),
+                kind: c.kind || (String(c.room).indexOf('group_') === 0 ? 'group'
+                    : (String(c.room).indexOf('fav_') === 0 ? 'saved' : 'dm')),
                 members: c.members || [state.me.id],
                 slug: c.slug || null,
                 owner_id: c.owner_id || null,
@@ -1372,6 +1560,7 @@
 
         return fetchChats.then(function (rows) {
             state.chats = mergeChats(rows);
+            ensureSaved();
             persistChats();
             var ids = [];
             state.chats.forEach(function (c) {
@@ -1472,6 +1661,7 @@
                 unread: c.unread || 0,
                 pinned: !!p.pinned,
                 muted: !!p.muted,
+                saved: c.kind === 'saved',
                 encrypted: !!state.keys[c.room_id]
             };
         }).filter(function (c) {
@@ -1479,6 +1669,7 @@
         });
 
         list.sort(function (a, b) {
+            if (a.saved !== b.saved) return a.saved ? -1 : 1;   // «Избранное» всегда сверху
             if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
             return String(b.ts || '').localeCompare(String(a.ts || ''));
         });
@@ -1487,11 +1678,13 @@
 
     function chatRowHtml(c) {
         var preview = c.preview;
-        if (!preview) preview = c.kind === 'channel' ? 'Канал' : 'Нажмите, чтобы открыть';
+        if (!preview && c.kind === 'saved') preview = 'Заметки и файлы только для вас';
+        else if (!preview) preview = c.kind === 'channel' ? 'Канал' : 'Нажмите, чтобы открыть';
         else if (isImage(preview)) preview = '📷 Фото';
         else if (CR && CR.isEncrypted(preview)) preview = '🔒 Зашифрованное сообщение';
 
-        var icon = c.kind === 'channel' ? ' 📣' : (c.kind === 'group' ? ' 👥' : '');
+        var icon = c.kind === 'channel' ? ' 📣'
+            : (c.kind === 'group' ? ' 👥' : (c.kind === 'saved' ? ' 🔖' : ''));
         return '<div class="f-item' + (state.selectedRoom === c.room_id ? ' selected' : '') + '"' +
             ' data-room="' + esc(c.room_id) + '">' +
             '<img class="chat-av" alt="" src="' + esc(c.avatar) + '">' +
@@ -1513,15 +1706,18 @@
         state.listSig = sig;
 
         if (!list.length) {
-            var term = state.search.trim();
-            box.innerHTML = '<div class="empty-state"><div class="ico">' + (term ? '🔍' : '💬') + '</div>' +
-                '<b>' + (term ? 'Среди ваших чатов ничего нет' : 'Чатов пока нет') + '</b>' +
-                '<p>' + (term ? 'Посмотрите результаты глобального поиска ниже'
-                    : 'Нажмите «＋» вверху, чтобы написать человеку,<br>создать группу или свой канал') + '</p></div>';
+            // В режиме поиска пустоту показывает общий блок «Ничего не найдено»,
+            // чтобы под запросом не висели две подсказки подряд.
+            box.innerHTML = state.search.trim() ? ''
+                : '<div class="empty-state"><div class="ico">💬</div>' +
+                '<b>Чатов пока нет</b><p>Нажмите «＋» вверху, чтобы написать человеку,' +
+                '<br>создать группу или свой канал</p></div>';
+            updateSearchViews();
             return;
         }
 
         box.innerHTML = list.map(chatRowHtml).join('');
+        updateSearchViews();
     }
 
     function cacheChatList() {
@@ -1537,17 +1733,149 @@
 
     /* ------------------------------------------------ глобальный поиск */
 
+    /* Экран поиска: пока он открыт, список чатов превращается в результаты,
+       а шапка уступает место строке ввода с кнопкой «Отмена». */
+
+    function openSearch() {
+        if (state.searchMode) return;
+        state.searchMode = true;
+        document.body.classList.add('searching');
+        renderRecent();
+        updateSearchViews();
+    }
+
+    function closeSearch() {
+        state.searchMode = false;
+        document.body.classList.remove('searching');
+        $('chat-search').value = '';
+        $('chat-search').blur();
+        runSearch('');
+    }
+
+    function recentQueries() {
+        var list = readJSON(LS.recent, []);
+        return Array.isArray(list) ? list.filter(function (s) { return typeof s === 'string'; }) : [];
+    }
+
+    function rememberQuery(term) {
+        term = String(term || '').trim();
+        if (term.length < 2) return;
+        var list = recentQueries().filter(function (s) { return s.toLowerCase() !== term.toLowerCase(); });
+        list.unshift(term);
+        writeJSON(LS.recent, list.slice(0, 8));
+    }
+
+    function renderRecent() {
+        var box = $('search-recent');
+        var list = recentQueries();
+        if (!state.searchMode || state.search.trim() || !list.length) { box.hidden = true; return; }
+        box.hidden = false;
+        box.innerHTML = '<div class="section-title top">Недавние запросы' +
+            '<button type="button" class="link-btn" id="recent-clear">Очистить</button></div>' +
+            '<div class="chips">' + list.map(function (s) {
+                return '<button type="button" class="chip" data-recent="' + esc(s) + '">🕘 ' + esc(s) + '</button>';
+            }).join('') + '</div>';
+    }
+
+    /* Поиск по загруженной переписке: тексты уже расшифрованы на устройстве,
+       поэтому искать можно, не отправляя запрос наружу. */
+    function searchMessages(term) {
+        var needle = term.toLowerCase();
+        var out = [];
+        state.chats.forEach(function (chat) {
+            var cached = readJSON(LS.cacheMsgs + chat.room_id, []);
+            if (!Array.isArray(cached)) return;
+            for (var i = cached.length - 1; i >= 0 && out.length < 30; i--) {
+                var m = cached[i];
+                var text = m && typeof m.text === 'string' ? m.text : '';
+                if (!text || isPhoto(text) || (CR && CR.isEncrypted(text))) continue;
+                if (text.toLowerCase().indexOf(needle) < 0) continue;
+                out.push({
+                    room_id: chat.room_id,
+                    id: m.id,
+                    title: chatDisplayName(chat),
+                    avatar: chatAvatar(chat),
+                    author: m.user_id === state.me.id ? 'Вы' : (m.user_name || ''),
+                    text: text,
+                    created_at: m.created_at
+                });
+            }
+        });
+        out.sort(function (a, b) { return String(b.created_at || '').localeCompare(String(a.created_at || '')); });
+        return out.slice(0, 20);
+    }
+
+    function highlight(text, term) {
+        var idx = text.toLowerCase().indexOf(term.toLowerCase());
+        if (idx < 0) return esc(text.slice(0, 90));
+        var from = Math.max(0, idx - 24);
+        var cut = text.slice(from, from + 90);
+        var pos = idx - from;
+        return (from ? '…' : '') + esc(cut.slice(0, pos)) +
+            '<mark>' + esc(cut.slice(pos, pos + term.length)) + '</mark>' +
+            esc(cut.slice(pos + term.length));
+    }
+
+    function renderMsgResults() {
+        var box = $('msg-results');
+        var res = state.msgResults;
+        var sig = JSON.stringify(res);
+        if (sig === state.msgSig) return;
+        state.msgSig = sig;
+
+        if (!res || !res.length) { box.innerHTML = ''; return; }
+        var term = state.search.trim();
+        box.innerHTML = '<div class="section-title">Сообщения</div>' + res.map(function (m) {
+            return '<div class="f-item" data-goto-room="' + esc(m.room_id) + '"' +
+                ' data-goto-msg="' + esc(m.id) + '">' +
+                '<img class="chat-av" alt="" src="' + esc(m.avatar) + '">' +
+                '<div class="chat-info"><b>' + esc(m.title) + '</b>' +
+                '<small>' + (m.author ? esc(m.author) + ': ' : '') + highlight(m.text, term) + '</small></div>' +
+                '<span class="chat-time">' + esc(m.created_at ? fmtListTime(m.created_at) : '') + '</span>' +
+                '</div>';
+        }).join('');
+    }
+
+    /* Показываем только то, что относится к текущему состоянию экрана. */
+    function updateSearchViews() {
+        var term = state.search.trim();
+        var searching = state.searchMode && !!term;
+
+        $('chat-section').hidden = !searching || !$('chat-list').querySelector('.f-item');
+        $('search-recent').hidden = !state.searchMode || !!term || !recentQueries().length;
+
+        var empty = searching &&
+            !$('chat-list').querySelector('.f-item') &&
+            !$('global-results').querySelector('.f-item') &&
+            !$('msg-results').querySelector('.f-item') &&
+            state.globalResults !== null;
+        $('search-empty').hidden = !empty;
+    }
+
     function runSearch(value) {
         state.search = value;
+        $('search-clear').hidden = !value;
         renderChatList();
+        renderRecent();
         clearTimeout(state.searchTimer);
+
         var term = value.trim().replace(/^@+/, '');
         if (term.length < 2) {
             state.globalResults = null;
+            state.msgResults = null;
             renderGlobal();
+            renderMsgResults();
+            updateSearchViews();
             return;
         }
-        state.searchTimer = setTimeout(function () { globalSearch(term); }, 280);
+
+        state.msgResults = searchMessages(term);
+        renderMsgResults();
+        updateSearchViews();
+        state.searchTimer = setTimeout(function () {
+            rememberQuery(term);
+            globalSearch(term);
+        }, 280);
     }
 
     function globalSearch(term) {
@@ -1598,6 +1926,7 @@
         var res = state.globalResults;
         if (!res) {
             if (state.globalSig !== '') { box.innerHTML = ''; state.globalSig = ''; }
+            updateSearchViews();
             return;
         }
 
@@ -1621,7 +1950,7 @@
         }
 
         if (res.users.length) {
-            html += '<div class="section-title">Пользователи</div>';
+            html += '<div class="section-title">Люди</div>';
             html += res.users.map(function (u) {
                 return '<div class="f-item" data-user="' + esc(u.nickname) + '">' +
                     '<img class="chat-av" alt="" src="' + esc(u.avatar || avatarFor(u.name, u.id)) + '">' +
@@ -1631,12 +1960,8 @@
             }).join('');
         }
 
-        if (!html) {
-            html = '<div class="empty-state small-state"><div class="ico">🔍</div>' +
-                '<b>Ничего не найдено</b><p>Проверьте написание запроса</p></div>';
-        }
-
-        box.innerHTML = '<div class="section-title top">Глобальный поиск</div>' + html;
+        box.innerHTML = html;
+        updateSearchViews();
     }
 
     /* ------------------------------------------------- создание и подписки */
@@ -1998,6 +2323,8 @@
             if (chat.slug) sub = '@' + chat.slug + ' · ' + sub;
         } else if (chat.kind === 'group') {
             sub = plural((chat.members || []).length, 'участник', 'участника', 'участников');
+        } else if (isSaved(chat)) {
+            sub = 'виден только вам';
         } else {
             var other = (chat.members || []).filter(function (m) { return m !== state.me.id; })[0];
             var p = other && state.profiles[other];
@@ -2007,9 +2334,9 @@
         $('chat-subtitle').textContent = sub;
 
         $('act-invite').hidden = chat.kind !== 'group';
-        $('act-leave').hidden = chat.kind === 'dm' || (chat.kind === 'channel' && !isMember(chat));
-        $('act-leave').hidden = chat.kind === 'dm';
-        $('act-delete').hidden = chat.kind === 'channel' && chat.owner_id !== state.me.id;
+        $('act-leave').hidden = chat.kind === 'dm' || isSaved(chat);
+        $('act-delete').hidden = isSaved(chat) ||
+            (chat.kind === 'channel' && chat.owner_id !== state.me.id);
         $('act-clear').hidden = !canPost(chat);
         $('act-crypto').hidden = chat.kind === 'channel';
 
@@ -2028,6 +2355,7 @@
     function openChat(room) {
         var chat = findChat(room);
         if (!chat) return;
+        if (state.searchMode) closeSearch();
         state.activeRoom = room;
         state.activeChat = chat;
         state.msgs = [];
@@ -2392,7 +2720,8 @@
 
         var wasAtBottom = isAtBottom();
         // в группах, каналах и обсуждениях показываем автора входящего сообщения
-        var isGroup = state.activeChat && state.activeChat.kind !== 'dm';
+        var isGroup = state.activeChat && state.activeChat.kind !== 'dm' &&
+            !isSaved(state.activeChat);
 
         var desired = [];
         var lastDay = '';
@@ -3060,8 +3389,18 @@
     function openPlus() { $('plus-menu').classList.add('show'); }
     function closePlus() { $('plus-menu').classList.remove('show'); }
 
+    /* Закрывает верхнее открытое окно; возвращает true, если было что закрывать. */
+    function closeTopModal() {
+        var open = document.querySelectorAll('.modal-overlay.show, .lightbox.show');
+        if (!open.length) return false;
+        open[open.length - 1].classList.remove('show');
+        return true;
+    }
+
     /* ------------------------------------------------ настройки соединения */
 
+    /* Показываем только названия каналов связи и их состояние: адреса серверов
+       на экран не выводятся — ни свои, ни сохранённый пользователем. */
     function renderConnList() {
         var box = $('conn-list');
         if (!box) return;
@@ -3069,19 +3408,22 @@
         box.innerHTML = candidates().map(function (c) {
             var st = api.statuses[c.url] || '';
             var h = api.health[c.url] || {};
-            var active = api.base === c.url;
-            var note = '';
-            if (active) note = ' · активен';
-            else if (h.cooldownUntil > now) note = ' · пауза ' + Math.ceil((h.cooldownUntil - now) / 1000) + ' с';
+            var note;
+            if (api.base === c.url) note = 'активен';
+            else if (h.cooldownUntil > now) note = 'пауза ' + Math.ceil((h.cooldownUntil - now) / 1000) + ' с';
+            else if (st === 'ok') note = 'доступен';
+            else if (st === 'bad') note = 'не отвечает';
+            else note = 'не проверялся';
             if (h.latency != null && st === 'ok') note += ' · ' + h.latency + ' мс';
+
             return '<div class="conn-row"><span class="dot ' + esc(st) + '"></span>' +
-                '<div style="flex:1;min-width:0"><div>' + esc(c.label) + esc(note) + '</div>' +
-                '<div class="url">' + esc(c.url) + '</div></div></div>';
+                '<div class="conn-body"><div class="conn-name">' + esc(c.label) + '</div>' +
+                '<div class="conn-note">' + esc(note) + '</div></div></div>';
         }).join('');
     }
 
     function openConnection() {
-        $('conn-custom').value = localStorage.getItem(LS.api) || '';
+        $('conn-custom').value = '';        // сохранённый адрес не показываем
         renderConnList();
         $('conn-modal').classList.add('show');
     }
@@ -3091,9 +3433,10 @@
         if (val) {
             if (!/^https?:\/\//i.test(val)) { toast('Адрес должен начинаться с https://'); return; }
             localStorage.setItem(LS.api, val);
-        } else {
-            localStorage.removeItem(LS.api);
+            $('conn-custom').value = '';
         }
+        // Пустое поле означает «просто проверить связь»: сохранённый адрес
+        // убирается кнопкой «Сбросить», а не случайным нажатием.
         localStorage.removeItem(LS.apiActive);
         api.base = null;
         api.statuses = {};
@@ -3114,6 +3457,7 @@
         localStorage.removeItem(LS.api);
         localStorage.removeItem(LS.apiActive);
         $('conn-custom').value = '';
+        toast('Свой канал связи убран');
         api.base = null;
         api.statuses = {};
         api.health = {};
@@ -3214,6 +3558,65 @@
             typeof Notification !== 'undefined' && Notification.permission === 'granted';
     }
 
+    /* ------------------------------------------------------------------ звук
+
+       Короткий мягкий сигнал из двух нот. Он собирается прямо в браузере,
+       поэтому ничего не скачивается, а громкость заведомо небольшая. Между
+       сигналами выдерживается пауза, чтобы поток сообщений не превратился
+       в трель. */
+
+    var audioCtx = null;
+    var lastSound = 0;
+
+    function soundEnabled() {
+        var saved = localStorage.getItem(LS.sound);
+        if (saved) return saved === 'on';
+        return devicePlatform() === 'desktop';      // на компьютере — по умолчанию
+    }
+
+    function playChime() {
+        if (Date.now() - lastSound < 2500) return;
+        lastSound = Date.now();
+        try {
+            var Ctx = window.AudioContext || window.webkitAudioContext;
+            if (!Ctx) return;
+            if (!audioCtx) audioCtx = new Ctx();
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+
+            var now = audioCtx.currentTime + 0.01;
+            [[880, 0], [1174.7, 0.1]].forEach(function (note) {
+                var osc = audioCtx.createOscillator();
+                var gain = audioCtx.createGain();
+                var at = now + note[1];
+                osc.type = 'sine';
+                osc.frequency.value = note[0];
+                gain.gain.setValueAtTime(0.0001, at);
+                gain.gain.exponentialRampToValueAtTime(0.075, at + 0.025);
+                gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.45);
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                osc.start(at);
+                osc.stop(at + 0.5);
+            });
+        } catch (e) { /* звук не критичен */ }
+    }
+
+    function updateSoundPill() {
+        var pill = $('sound-state');
+        if (!pill) return;
+        var on = soundEnabled();
+        pill.textContent = on ? 'вкл' : 'выкл';
+        pill.className = 'pill ' + (on ? 'ok' : '');
+    }
+
+    function toggleSound() {
+        var on = !soundEnabled();
+        localStorage.setItem(LS.sound, on ? 'on' : 'off');
+        updateSoundPill();
+        if (on) playChime();
+        toast(on ? 'Звук новых сообщений включён' : 'Звук выключен');
+    }
+
     function updateNotifyPill() {
         var pill = $('notify-state');
         if (!pill) return;
@@ -3309,7 +3712,10 @@
             }
         } catch (e) { /* не поддерживается */ }
 
-        if (!notifyEnabled()) return;
+        var wantPush = notifyEnabled();
+        var wantSound = soundEnabled();
+        if (!wantPush && !wantSound) return;
+
         var seen = readJSON(LS.notified, {});
         var changed = false;
 
@@ -3321,13 +3727,18 @@
 
             seen[c.room_id] = c.ts;
             changed = true;
+            if (!wantPush) return;
+
             var body = c.preview || 'Новое сообщение';
             if (CR && CR.isEncrypted(body)) body = 'Новое сообщение';
             showNotification(chatDisplayName(findChat(c.room_id) || c) || c.title,
                 body, c.room_id, c.lastId);
         });
 
-        if (changed) writeJSON(LS.notified, seen);
+        if (changed) {
+            writeJSON(LS.notified, seen);
+            if (wantSound) playChime();
+        }
     }
 
     /* Переход из уведомления: открыть чат и показать нужное сообщение. */
@@ -3343,6 +3754,7 @@
 
     function setupNotifications() {
         updateNotifyPill();
+        updateSoundPill();
 
         if (navigator.serviceWorker) {
             navigator.serviceWorker.addEventListener('message', function (event) {
@@ -3364,48 +3776,91 @@
 
     var installPrompt = null;
 
+    /* Инструкции по установке. Системный диалог есть не везде, поэтому для
+       каждого вида устройств показываем понятные шаги, а вкладки позволяют
+       посмотреть инструкцию и для чужого телефона. */
+
+    var INSTALL_GUIDES = {
+        android: {
+            label: '🤖 Android',
+            steps: [
+                'Нажмите кнопку «Установить» ниже. Если её нет — откройте меню браузера (три точки справа вверху).',
+                'Выберите пункт «Установить приложение» или «Добавить на главный экран».',
+                'Подтвердите установку в появившемся окне.'
+            ],
+            note: 'Работает в Chrome, Яндекс.Браузере и других браузерах на его основе.'
+        },
+        ios: {
+            label: '🍎 iPhone',
+            steps: [
+                'Откройте сайт именно в Safari — в других браузерах на iPhone установка недоступна.',
+                'Нажмите кнопку «Поделиться» внизу экрана — квадрат со стрелкой вверх.',
+                'Пролистайте список и выберите «На экран «Домой»».',
+                'Нажмите «Добавить» справа вверху.'
+            ],
+            note: 'Иконка появится на домашнем экране, приложение откроется без адресной строки.'
+        },
+        desktop: {
+            label: '💻 Компьютер',
+            steps: [
+                'Нажмите кнопку «Установить» ниже или значок установки в правой части адресной строки.',
+                'Если значка нет — откройте меню браузера и выберите «Установить приложение».',
+                'Приложение появится в списке программ и будет открываться отдельным окном.'
+            ],
+            note: 'Поддерживают Chrome, Edge и Яндекс.Браузер. В Firefox установка недоступна — сайт работает как обычная вкладка.'
+        }
+    };
+
+    function devicePlatform() {
+        var ua = navigator.userAgent;
+        if (/iphone|ipad|ipod/i.test(ua)) return 'ios';
+        if (/android/i.test(ua)) return 'android';
+        return 'desktop';
+    }
+
+    function appInstalled() {
+        return window.matchMedia('(display-mode: standalone)').matches ||
+            navigator.standalone === true;
+    }
+
     function setupInstall() {
         window.addEventListener('beforeinstallprompt', function (e) {
             e.preventDefault();
             installPrompt = e;
-            $('set-install').hidden = false;
+            if ($('install-modal').classList.contains('show')) renderInstall(state.installTab);
         });
 
         window.addEventListener('appinstalled', function () {
             installPrompt = null;
-            $('set-install').hidden = true;
+            $('install-modal').classList.remove('show');
             toast('Приложение установлено');
         });
+    }
 
-        // На iOS системного диалога нет — показываем инструкцию.
-        var isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
-        var standalone = window.matchMedia('(display-mode: standalone)').matches ||
-            navigator.standalone === true;
-        if (isIOS && !standalone) $('set-install').hidden = false;
+    function renderInstall(platform) {
+        state.installTab = platform;
+        var guide = INSTALL_GUIDES[platform] || INSTALL_GUIDES.desktop;
+
+        $('install-tabs').innerHTML = Object.keys(INSTALL_GUIDES).map(function (key) {
+            return '<button type="button" class="install-tab' + (key === platform ? ' active' : '') +
+                '" data-platform="' + key + '">' + esc(INSTALL_GUIDES[key].label) + '</button>';
+        }).join('');
+
+        $('install-steps').innerHTML = guide.steps.map(function (s) {
+            return '<li>' + esc(s) + '</li>';
+        }).join('');
+
+        $('install-note').textContent = appInstalled()
+            ? 'Приложение уже установлено — вы открыли его с домашнего экрана.'
+            : guide.note;
+
+        // Системный диалог браузер отдаёт только своей платформе.
+        var canPrompt = !!installPrompt && platform === devicePlatform();
+        $('install-go').hidden = !canPrompt;
     }
 
     function openInstall() {
-        var isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
-        if (installPrompt) {
-            $('install-text').textContent =
-                'Приложение появится на домашнем экране и будет открываться без адресной строки.';
-            $('install-go').hidden = false;
-            $('install-go').onclick = function () {
-                $('install-modal').classList.remove('show');
-                installPrompt.prompt();
-                installPrompt = null;
-            };
-        } else if (isIOS) {
-            $('install-text').textContent =
-                'В Safari нажмите «Поделиться» (квадрат со стрелкой вверх) → ' +
-                '«На экран «Домой»» → «Добавить». Приложение появится на домашнем экране.';
-            $('install-go').hidden = true;
-        } else {
-            $('install-text').textContent =
-                'Откройте меню браузера и выберите «Установить приложение» ' +
-                'или «Добавить на главный экран».';
-            $('install-go').hidden = true;
-        }
+        renderInstall(devicePlatform());
         $('install-modal').classList.add('show');
     }
 
@@ -3416,6 +3871,7 @@
         updateProfileUI();
         renderThemes();
         state.chats = mergeChats([]);
+        ensureSaved();
         paintCachedChatList();
         renderChatList();
         syncChats();
@@ -3431,7 +3887,38 @@
 
         $('btn-settings').addEventListener('click', function () { showPage('settings', true); renderThemes(); });
         $('btn-plus').addEventListener('click', openPlus);
-        $('chat-search').addEventListener('input', function (e) { runSearch(e.target.value); });
+        $('chat-search').addEventListener('input', function (e) { openSearch(); runSearch(e.target.value); });
+        $('chat-search').addEventListener('focus', openSearch);
+        $('chat-search').addEventListener('keydown', function (e) {
+            if (e.key === 'Escape') { e.preventDefault(); closeSearch(); }
+        });
+        $('search-cancel').addEventListener('click', closeSearch);
+        $('search-clear').addEventListener('click', function () {
+            $('chat-search').value = '';
+            runSearch('');
+            $('chat-search').focus();
+        });
+        $('search-recent').addEventListener('click', function (e) {
+            if (e.target.id === 'recent-clear') {
+                localStorage.removeItem(LS.recent);
+                renderRecent();
+                return;
+            }
+            var chip = e.target.closest('[data-recent]');
+            if (!chip) return;
+            var term = chip.getAttribute('data-recent');
+            $('chat-search').value = term;
+            runSearch(term);
+        });
+        $('msg-results').addEventListener('click', function (e) {
+            var row = e.target.closest('[data-goto-room]');
+            if (!row) return;
+            var room = row.getAttribute('data-goto-room');
+            var msg = row.getAttribute('data-goto-msg');
+            closeSearch();
+            openChat(room);
+            if (msg) setTimeout(function () { scrollToMessage(msg); }, 700);
+        });
 
         $('ctx-close').addEventListener('click', resetSelection);
         $('ctx-pin').addEventListener('click', function () {
@@ -3453,6 +3940,11 @@
         $('ctx-delete').addEventListener('click', function () {
             var room = state.selectedRoom;
             if (!room) return;
+            if (isSaved(findChat(room))) {
+                resetSelection();
+                toast('«Избранное» удалить нельзя — очистите историю внутри');
+                return;
+            }
             confirmBox('Удалить чат?', 'Чат и переписка будут удалены.', 'Удалить', function () {
                 resetSelection();
                 removeChat(room).then(function () { toast('Чат удалён'); });
@@ -3485,8 +3977,7 @@
             if (channel) {
                 previewChannel(channel);
             } else if (user) {
-                $('chat-search').value = '';
-                runSearch('');
+                closeSearch();
                 startDialog(user);
             }
         });
@@ -3612,7 +4103,18 @@
             });
         });
         $('set-notify').addEventListener('click', toggleNotifications);
+        $('set-sound').addEventListener('click', toggleSound);
         $('set-install').addEventListener('click', openInstall);
+        $('install-tabs').addEventListener('click', function (e) {
+            var tab = e.target.closest('[data-platform]');
+            if (tab) renderInstall(tab.getAttribute('data-platform'));
+        });
+        $('install-go').addEventListener('click', function () {
+            if (!installPrompt) return;
+            $('install-modal').classList.remove('show');
+            installPrompt.prompt();
+            installPrompt = null;
+        });
         $('install-close').addEventListener('click', function () {
             $('install-modal').classList.remove('show');
         });
@@ -3622,6 +4124,7 @@
         $('set-logout').addEventListener('click', logout);
         $('set-delete').addEventListener('click', deleteAccount);
 
+        $('plus-saved').addEventListener('click', openSaved);
         $('plus-user').addEventListener('click', function () { addUser(); });
         $('plus-group').addEventListener('click', createGroup);
         $('plus-channel').addEventListener('click', openChannelModal);
@@ -3637,9 +4140,24 @@
         $('crypto-modal').addEventListener('click', function (e) { if (e.target === this) this.classList.remove('show'); });
 
         $('conn-save').addEventListener('click', saveConnection);
+        $('conn-check').addEventListener('click', function () {
+            toast('Проверяем связь…');
+            reconnect().then(renderConnList);
+        });
         $('conn-reset').addEventListener('click', resetConnection);
         $('conn-close').addEventListener('click', function () { $('conn-modal').classList.remove('show'); });
         $('conn-modal').addEventListener('click', function (e) { if (e.target === this) this.classList.remove('show'); });
+
+        $('net-retry').addEventListener('click', reconnect);
+        $('net-setup').addEventListener('click', openConnection);
+
+        // Esc закрывает то, что открыто последним: сначала окно, потом поиск.
+        document.addEventListener('keydown', function (e) {
+            if (e.key !== 'Escape') return;
+            if (closeTopModal()) return;
+            if (state.searchMode) { closeSearch(); return; }
+            if (state.page === 'chat') closeChat();
+        });
 
         document.addEventListener('visibilitychange', function () {
             if (document.hidden || !state.me) return;
@@ -3651,13 +4169,32 @@
         window.addEventListener('offline', function () { setNetState(false, 'Устройство не в сети'); });
     }
 
+    /* Адрес сервера из ссылки. Чужой адрес принимаем только с явного согласия:
+       иначе достаточно было бы прислать ссылку, чтобы увести переписку и пароль
+       на посторонний сервер. */
+    function applyApiFromLink(raw) {
+        var value = String(raw).replace(/\/+$/, '');
+        var host;
+        try { host = new URL(value, location.href).host; } catch (e) { return; }
+
+        var save = function () {
+            localStorage.setItem(LS.api, value);
+            localStorage.removeItem(LS.apiActive);
+            api.base = null;
+            api.statuses = {};
+            api.health = {};
+        };
+
+        if (host === location.host) { save(); return; }
+        confirmBox('Сменить сервер?', 'Ссылка предлагает отправлять ваши сообщения и пароль ' +
+            'на сервер ' + host + '. Соглашайтесь, только если это ваш собственный сервер.',
+        'Разрешить', function () { save(); reconnect(); });
+    }
+
     function init() {
         var params = new URLSearchParams(location.search);
-        if (params.get('api')) {
-            localStorage.setItem(LS.api, params.get('api').replace(/\/+$/, ''));
-            localStorage.removeItem(LS.apiActive);
-            history.replaceState(null, '', location.pathname + location.hash);
-        }
+        var fromLink = params.get('api');
+        if (fromLink) history.replaceState(null, '', location.pathname + location.hash);
 
         setTheme(localStorage.getItem(LS.theme) || 'dark');
         applyMotion();
@@ -3672,9 +4209,14 @@
         if (state.me && state.me.id) startApp();
         else showPage('auth');
 
+        if (fromLink) applyApiFromLink(fromLink);
+
         resolveApi(false).then(function (base) {
             if (base && state.me) syncChats();
         });
+
+        // Ярлык «Написать» из меню приложения открывает выбор собеседника.
+        if (params.get('action') === 'new' && state.me) setTimeout(openPlus, 300);
 
         if ('serviceWorker' in navigator && location.protocol.indexOf('http') === 0) {
             navigator.serviceWorker.register('sw.js').catch(function () { /* не критично */ });

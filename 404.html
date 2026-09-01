@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WolffMsg</title>
+<style>
+    html, body { height: 100%; margin: 0; background: #0e0e10; color: #e8e8ea;
+                 font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .box { height: 100%; display: flex; flex-direction: column; align-items: center;
+           justify-content: center; gap: 14px; text-align: center; padding: 24px; }
+    .logo { font-size: 54px; }
+    a { color: #8ea2ff; }
+</style>
+</head>
+<body>
+
+<!-- Страница-спасатель.
+
+     Ярлык приложения, сохранённый прошлой версией, мог указывать на подпапку,
+     которой на сайте нет. Вместо чужой страницы «404» человек попадает сюда и
+     тут же переходит на главную с сохранением адреса чата из уведомления. -->
+
+<div class="box">
+    <div class="logo">🐺</div>
+    <b>WolffMsg</b>
+    <p>Открываем приложение…</p>
+    <p><a id="home" href="/">Перейти вручную</a></p>
+</div>
+
+<script>
+(function () {
+    var path = location.pathname.replace(/\/+$/, '');
+    var parts = path.split('/').filter(Boolean);
+    // На github.io сайт живёт в подпапке с именем репозитория, на своём
+    // домене — в корне.
+    var root = (/\.github\.io$/i.test(location.hostname) && parts.length)
+        ? '/' + parts[0] + '/'
+        : '/';
+    var target = root + location.search + location.hash;
+    document.getElementById('home').setAttribute('href', target);
+    if (path !== root.replace(/\/+$/, '')) location.replace(target);
+})();
+</script>
+
+</body>
+</html>

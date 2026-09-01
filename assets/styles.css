@@ -166,6 +166,10 @@ button, input, textarea {
     color: inherit;
 }
 
+/* Скрытый элемент скрыт всегда: иначе display из класса перебивает
+   атрибут hidden, и блок остаётся на экране. */
+[hidden] { display: none !important; }
+
 .muted { color: var(--text-muted); }
 .small { font-size: 13px; }
 .danger { color: var(--danger); }
@@ -320,19 +324,130 @@ header b { font-size: 19px; letter-spacing: -0.4px; }
 
 /* ------------------------------ список чатов ------------------------------ */
 
-.search-row { padding: 10px 16px; border-bottom: 0.5px solid var(--border); }
+.search-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    border-bottom: 0.5px solid var(--border);
+}
+
+.search-field {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    background: var(--card);
+    border-radius: 12px;
+    transition: box-shadow 0.2s var(--ease-out);
+}
+
+.search-field:focus-within { box-shadow: 0 0 0 1.5px var(--accent); }
+
+.search-ico { padding-left: 12px; font-size: 14px; opacity: 0.65; }
 
 .search-row input {
-    width: 100%;
-    padding: 10px 16px;
+    flex: 1;
+    min-width: 0;
+    padding: 10px 12px;
     border-radius: 12px;
     border: none;
-    background: var(--card);
+    background: transparent;
     color: var(--text);
     font-size: 16px;
 }
 
-.search-row input:focus { outline: 1px solid var(--accent); }
+.search-row input:focus { outline: none; }
+.search-row input::-webkit-search-cancel-button { display: none; }
+
+.search-clear {
+    border: none;
+    background: var(--hover);
+    color: var(--text-muted);
+    width: 22px;
+    height: 22px;
+    margin-right: 8px;
+    border-radius: 50%;
+    font-size: 11px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+/* Кнопка «Отмена» появляется, только когда открыт экран поиска. */
+.search-cancel {
+    flex: 0 0 auto;
+    border: none;
+    background: none;
+    color: var(--accent);
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 0;
+    width: 0;
+    opacity: 0;
+    overflow: hidden;
+    transition: width 0.22s var(--ease-out), opacity 0.18s var(--ease-out);
+}
+
+body.searching .search-cancel { width: 66px; opacity: 1; }
+
+/* Пока идёт поиск, шапка со списком чатов уступает место результатам. */
+body.searching #page-main > header {
+    height: 0;
+    min-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    opacity: 0;
+    overflow: hidden;
+    border: none;
+}
+
+#page-main > header {
+    transition: height 0.22s var(--ease-out), opacity 0.18s var(--ease-out);
+}
+
+body.searching #page-main .search-row { padding-top: calc(var(--safe-top) + 10px); }
+
+.search-recent .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 0 16px 8px;
+}
+
+.chip {
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--text);
+    border-radius: 16px;
+    padding: 7px 13px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: transform 0.15s var(--ease-out), background 0.15s;
+}
+
+.chip:active { transform: scale(0.95); }
+
+.link-btn {
+    float: right;
+    border: none;
+    background: none;
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    cursor: pointer;
+    padding: 0;
+}
+
+#msg-results mark {
+    background: rgba(10, 132, 255, 0.28);
+    color: var(--text);
+    border-radius: 3px;
+    padding: 0 1px;
+}
 
 .scroll-area {
     flex: 1;
@@ -896,14 +1011,112 @@ header b { font-size: 19px; letter-spacing: -0.4px; }
     padding: 10px 12px;
 }
 
-.conn-row .url {
+.conn-body { flex: 1; min-width: 0; }
+.conn-name { font-weight: 600; }
+.conn-note { color: var(--text-muted); font-size: 11px; margin-top: 2px; }
+
+.conn-advanced {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 10px 12px;
+    margin-bottom: 14px;
+}
+
+.conn-advanced summary {
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    list-style: none;
+}
+
+.conn-advanced summary::-webkit-details-marker { display: none; }
+.conn-advanced summary::before { content: '⚙️ '; }
+.conn-advanced p { margin: 10px 0; }
+.btn-primary.wide { width: 100%; padding: 11px; border-radius: 12px; border: none; font-weight: 600; cursor: pointer; }
+
+/* -------------------------------- установка приложения -------------------------------- */
+
+.install-sheet { text-align: left; }
+
+.install-hero { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; }
+
+.install-icon {
+    width: 56px;
+    height: 56px;
+    border-radius: 14px;
+    flex: 0 0 auto;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
+}
+
+.install-hero-text h3 { margin: 0 0 4px; }
+.install-hero-text p { margin: 0; }
+
+.install-tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+
+.install-tab {
     flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    border: 1px solid var(--border);
+    background: var(--bg);
     color: var(--text-muted);
-    font-size: 11px;
+    border-radius: 12px;
+    padding: 9px 6px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.18s var(--ease-out), color 0.18s, transform 0.15s;
+}
+
+.install-tab:active { transform: scale(0.96); }
+.install-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.install-steps {
+    margin: 0 0 12px;
+    padding-left: 0;
+    list-style: none;
+    counter-reset: step;
+}
+
+.install-steps li {
+    counter-increment: step;
+    position: relative;
+    padding: 0 0 14px 40px;
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.install-steps li::before {
+    content: counter(step);
+    position: absolute;
+    left: 0;
+    top: -1px;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Соединительная линия между шагами. */
+.install-steps li:not(:last-child)::after {
+    content: '';
+    position: absolute;
+    left: 12.5px;
+    top: 28px;
+    bottom: 4px;
+    width: 1.5px;
+    background: var(--border);
+}
+
+.install-note {
+    background: var(--hover);
+    border-radius: 12px;
+    padding: 10px 12px;
+    margin: 0 0 4px;
 }
 
 .conn-row .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text-muted); flex: 0 0 auto; }

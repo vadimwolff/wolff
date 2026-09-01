@@ -6,7 +6,18 @@
 <meta name="theme-color" content="#000000">
 <meta name="description" content="WolffMsg — лёгкий веб-мессенджер с публичными каналами и шифрованием">
 <title>WolffMsg</title>
-<link rel="manifest" href="assets/manifest.webmanifest">
+
+<!-- Политика безопасности: страница исполняет только собственные скрипты,
+     поэтому чужой код, попавший в текст сообщения, выполнить невозможно.
+     Запросы уходят только по https, картинки — свои и вложения из data:. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self';
+      script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:;
+      font-src 'self'; connect-src 'self' https:; media-src 'self' data: blob:;
+      worker-src 'self'; manifest-src 'self';
+      base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta name="referrer" content="no-referrer">
+
+<link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
 <link rel="icon" href="assets/icon-192.png" sizes="192x192" type="image/png">
 <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
@@ -23,8 +34,8 @@
 
 <div id="net-banner" hidden>
     <span id="net-banner-text">Нет связи с сервером</span>
-    <button type="button" onclick="WM.reconnect()">Повторить</button>
-    <button type="button" onclick="WM.openConnection()">Настроить</button>
+    <button type="button" id="net-retry">Повторить</button>
+    <button type="button" id="net-setup">Настроить</button>
 </div>
 
 <!-- ================= АВТОРИЗАЦИЯ ================= -->
@@ -55,9 +66,14 @@
         <span class="hdr-btn accent" id="btn-plus" title="Новый чат">＋</span>
     </header>
 
-    <div class="search-row">
-        <input type="search" id="chat-search" placeholder="Поиск чатов, каналов и людей"
-               autocomplete="off" autocapitalize="none">
+    <div class="search-row" id="search-row">
+        <div class="search-field">
+            <span class="search-ico">🔍</span>
+            <input type="search" id="chat-search" placeholder="Поиск чатов, каналов и людей"
+                   autocomplete="off" autocapitalize="none" spellcheck="false">
+            <button type="button" class="search-clear" id="search-clear" title="Очистить" hidden>✕</button>
+        </div>
+        <button type="button" class="search-cancel" id="search-cancel">Отмена</button>
     </div>
 
     <div id="context-bar">
@@ -68,8 +84,16 @@
     </div>
 
     <div class="scroll-area">
+        <div id="search-recent" class="search-recent" hidden></div>
+        <div id="chat-section" class="section-title top" hidden>Ваши чаты</div>
         <div id="chat-list"></div>
         <div id="global-results"></div>
+        <div id="msg-results"></div>
+        <div id="search-empty" class="empty-state small-state" hidden>
+            <div class="ico">🔍</div>
+            <b>Ничего не найдено</b>
+            <p>Проверьте написание запроса</p>
+        </div>
     </div>
 </div>
 
@@ -149,7 +173,8 @@
             <div class="settings-item" id="set-pass"><i>🔑</i> Изменить пароль</div>
             <div class="settings-item" id="set-conn"><i>🌐</i> Соединение <span id="conn-state" class="pill">…</span></div>
             <div class="settings-item" id="set-notify"><i>🔔</i> Уведомления <span id="notify-state" class="pill">выкл</span></div>
-            <div class="settings-item" id="set-install" hidden><i>📲</i> Установить приложение</div>
+            <div class="settings-item" id="set-sound"><i>🔉</i> Звук новых сообщений <span id="sound-state" class="pill">вкл</span></div>
+            <div class="settings-item" id="set-install"><i>📲</i> Установить приложение</div>
             <div class="settings-item" id="set-motion"><i>✨</i> Анимации <span id="motion-state" class="pill">вкл</span></div>
             <div class="settings-item" id="set-profile"><i>🪪</i> Мой профиль</div>
             <div class="settings-item" id="set-cache"><i>🧹</i> Очистить локальные данные</div>
@@ -164,6 +189,7 @@
 <!-- ================= МОДАЛКИ ================= -->
 <div id="plus-menu" class="modal-overlay">
     <div class="modal-menu">
+        <div class="modal-item" id="plus-saved">🔖 Избранное</div>
         <div class="modal-item" id="plus-user">👤 Написать пользователю</div>
         <div class="modal-item" id="plus-group">👨‍👩‍👧 Создать группу</div>
         <div class="modal-item" id="plus-channel">📣 Создать канал</div>
@@ -206,15 +232,23 @@
 <div id="conn-modal" class="modal-overlay">
     <div class="modal-sheet">
         <h3>Соединение с сервером</h3>
-        <p class="muted small">Приложение само выбирает первый доступный адрес и переключается,
-            когда сеть меняется — например при включении VPN. Если все адреса недоступны,
-            вставьте ссылку на свой прокси.</p>
+        <p class="muted small">Приложение само выбирает канал связи, который отвечает,
+            и переключается, когда сеть меняется — например при включении VPN.
+            Адреса серверов не показываются.</p>
         <div id="conn-list" class="conn-list"></div>
-        <input type="url" id="conn-custom" class="auth-input" placeholder="https://ваш-прокси/rest/v1"
-               autocapitalize="none" spellcheck="false">
+
+        <details class="conn-advanced">
+            <summary>Свой канал связи</summary>
+            <p class="muted small">Если ни один канал не отвечает, вставьте ссылку на свой прокси.
+                Сохранённая ссылка на экране не показывается — убрать её можно кнопкой «Сбросить».</p>
+            <input type="url" id="conn-custom" class="auth-input" placeholder="https://…"
+                   autocapitalize="none" spellcheck="false">
+            <button type="button" class="btn-primary wide" id="conn-save">Проверить и сохранить</button>
+        </details>
+
         <div class="sheet-row">
             <button type="button" class="btn-flat" id="conn-reset">Сбросить</button>
-            <button type="button" class="btn-primary" id="conn-save">Проверить и сохранить</button>
+            <button type="button" class="btn-primary" id="conn-check">Проверить связь</button>
         </div>
         <div class="modal-item cancel" id="conn-close">Закрыть</div>
     </div>
@@ -265,9 +299,20 @@
 </div>
 
 <div id="install-modal" class="modal-overlay">
-    <div class="modal-sheet">
-        <h3>Установить приложение</h3>
-        <p class="muted small" id="install-text"></p>
+    <div class="modal-sheet install-sheet">
+        <div class="install-hero">
+            <img class="install-icon" src="assets/icon-192.png" alt="">
+            <div class="install-hero-text">
+                <h3>Установить приложение</h3>
+                <p class="muted small">Иконка на экране, запуск без адресной строки,
+                    уведомления и работа офлайн.</p>
+            </div>
+        </div>
+
+        <div class="install-tabs" id="install-tabs"></div>
+        <ol class="install-steps" id="install-steps"></ol>
+        <p class="install-note muted small" id="install-note"></p>
+
         <div class="sheet-row">
             <button type="button" class="btn-flat" id="install-close">Понятно</button>
             <button type="button" class="btn-primary" id="install-go" hidden>Установить</button>

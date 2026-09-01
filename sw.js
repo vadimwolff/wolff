@@ -2,19 +2,19 @@
    Оболочка приложения отдаётся из кэша мгновенно, а свежая версия
    подтягивается в фоне. Запросы к API не кэшируются никогда. */
 
-var CACHE = 'wolffmsg-v54-1';
+var CACHE = 'wolffmsg-v55-1';
 
 var SHELL = [
     './',
     './index.html',
+    './manifest.webmanifest',
     './assets/styles.css',
     './assets/app.js',
     './assets/config.js',
     './assets/crypto.js',
     './assets/icon.svg',
     './assets/icon-192.png',
-    './assets/icon-512.png',
-    './assets/manifest.webmanifest'
+    './assets/icon-512.png'
 ];
 
 self.addEventListener('install', function (event) {
@@ -55,9 +55,18 @@ self.addEventListener('fetch', function (event) {
     if (url.pathname.indexOf('/rest/v1') >= 0) return;
 
     // Документ: сначала сеть (чтобы обновления доезжали), кэш — резерв.
+    // Если по адресу ничего нет (ярлык старой версии вёл в подпапку), отдаём
+    // саму оболочку приложения, а не чужую страницу «не найдено».
     if (req.mode === 'navigate') {
         event.respondWith(
-            fromNetwork(req).catch(function () {
+            fromNetwork(req).then(function (res) {
+                if (res && res.status === 404) {
+                    return caches.match('./index.html').then(function (hit) {
+                        return hit || fetch('./index.html').catch(function () { return res; });
+                    });
+                }
+                return res;
+            }).catch(function () {
                 return caches.match(req).then(function (hit) {
                     return hit || caches.match('./index.html');
                 });

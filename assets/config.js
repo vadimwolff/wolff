@@ -15,18 +15,18 @@ window.WM_CONFIG = {
     endpoints: [
         {
             /* Работает, когда сайт развёрнут на Vercel: запрос идёт на тот же
-               домен, что и сайт, и уже сервер обращается к Supabase. Самый
-               надёжный вариант для России — сторонние домены не задействуются. */
+               домен, что и сайт, и уже сервер обращается к базе. Самый надёжный
+               вариант для России — сторонние домены не задействуются. */
             url: "same-origin:/api/db",
             label: "Через сервер сайта"
         },
         {
             url: "https://myproxy.vadimwolff2000.workers.dev/rest/v1",
-            label: "Прокси Cloudflare"
+            label: "Резервный канал"
         },
         {
             url: "https://rzgiyafpkeqvbpqombkr.supabase.co/rest/v1",
-            label: "Supabase напрямую"
+            label: "Основной сервер"
         }
     ],
 

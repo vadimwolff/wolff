@@ -116,8 +116,19 @@
         return subtle.exportKey('jwk', privateKey);
     }
 
-    function importPrivateJwk(jwk) {
-        return subtle.importKey('jwk', jwk, CURVE, true, ['deriveKey', 'deriveBits']);
+    /* По умолчанию ключ создаётся «неизвлекаемым»: браузер даёт им подписывать
+       и расшифровывать, но не отдаёт его содержимое даже своему же коду.
+       Извлекаемая копия нужна ровно в двух местах — при выдаче ключей и при
+       смене пароля, когда закрытый ключ надо перешифровать заново. */
+    function importPrivateJwk(jwk, extractable) {
+        return subtle.importKey('jwk', jwk, CURVE, extractable === true, ['deriveKey', 'deriveBits']);
+    }
+
+    /* Копия ключа, которую нельзя выгрузить наружу. */
+    function hardenPrivate(privateKey) {
+        return exportPrivateJwk(privateKey).then(function (jwk) {
+            return importPrivateJwk(jwk, false);
+        });
     }
 
     /* Закрытый ключ шифруется ключом из пароля — на сервер уходит только это. */
@@ -127,9 +138,9 @@
         });
     }
 
-    function unwrapPrivate(payload, keyFromPassword) {
+    function unwrapPrivate(payload, keyFromPassword, extractable) {
         return decrypt(keyFromPassword, payload).then(function (json) {
-            return importPrivateJwk(JSON.parse(json));
+            return importPrivateJwk(JSON.parse(json), extractable);
         });
     }
 
@@ -181,6 +192,7 @@
         importPublic: importPublic,
         exportPrivateJwk: exportPrivateJwk,
         importPrivateJwk: importPrivateJwk,
+        hardenPrivate: hardenPrivate,
         wrapPrivate: wrapPrivate,
         unwrapPrivate: unwrapPrivate,
         sharedKey: sharedKey,

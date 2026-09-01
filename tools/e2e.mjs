@@ -70,7 +70,7 @@ await step('регистрация первого пользователя', asy
 });
 
 await step('регистрация второго пользователя', async () => {
-    bob = await newUser(browser, 'boris', 'Борис', 'qwerty1');
+    bob = await newUser(browser, 'boris', 'Борис', 'qwerty12');
 });
 
 await step('повторная регистрация того же ника отклоняется', async () => {
@@ -117,16 +117,19 @@ await step('Алиса отправляет сообщение', async () => {
 });
 
 await step('у Бориса появляется чат с непрочитанным', async () => {
+    // Первым в списке всегда стоит личный раздел «Избранное», поэтому ищем
+    // чат по имени собеседника, а не по позиции.
     await bob.page.waitForFunction(() => {
-        const item = document.querySelector('#chat-list .f-item');
-        return item && item.textContent.includes('Алиса') && item.querySelector('.badge').textContent === '1';
+        const item = [...document.querySelectorAll('#chat-list .f-item')]
+            .find((e) => e.textContent.includes('Алиса'));
+        return item && item.querySelector('.badge').textContent === '1';
     }, null, { timeout: 20000 });
-    const preview = await bob.page.textContent('#chat-list .f-item .chat-info small');
+    const preview = await bob.page.textContent('#chat-list .f-item:has-text("Алиса") .chat-info small');
     assert(preview.includes('Привет'), 'превью: ' + preview);
 });
 
 await step('Борис читает и отвечает', async () => {
-    await bob.page.click('#chat-list .f-item');
+    await bob.page.click('#chat-list .f-item:has-text("Алиса")');
     await bob.page.waitForSelector('.bubble.in', { timeout: 15000 });
     const incoming = await bob.page.textContent('.bubble.in .text');
     assert(incoming === 'Привет, Борис!', 'входящее: ' + incoming);
@@ -241,15 +244,18 @@ await step('поиск по списку чатов', async () => {
         () => document.querySelectorAll('#chat-list .f-item').length === 1, null, { timeout: 10000 });
     await bob.page.fill('#chat-search', '');
     await bob.page.waitForFunction(
-        () => document.querySelectorAll('#chat-list .f-item').length === 2, null, { timeout: 10000 });
+        () => document.querySelectorAll('#chat-list .f-item').length === 3, null, { timeout: 10000 });
 });
 
 await step('закрепление чата поднимает его наверх', async () => {
     await bob.page.locator('#chat-list .f-item:has-text("Алиса")').dispatchEvent('mousedown');
     await bob.page.waitForSelector('#context-bar.show', { timeout: 5000 });
     await bob.page.click('#ctx-pin');
-    await bob.page.waitForFunction(
-        () => document.querySelector('#chat-list .f-item').textContent.includes('📌'), null, { timeout: 10000 });
+    // «Избранное» остаётся первым, закреплённый чат встаёт сразу за ним.
+    await bob.page.waitForFunction(() => {
+        const rows = [...document.querySelectorAll('#chat-list .f-item')];
+        return rows[1] && rows[1].textContent.includes('📌') && rows[1].textContent.includes('Алиса');
+    }, null, { timeout: 10000 });
 });
 
 await step('очистка истории удаляет сообщения у обоих', async () => {
@@ -328,11 +334,11 @@ await step('скриншоты интерфейса', async () => {
     const page = await ctx.newPage();
     await page.goto(BASE + '/');
     await page.fill('#a-nick', 'boris');
-    await page.fill('#a-pass', 'qwerty1');
+    await page.fill('#a-pass', 'qwerty12');
     await page.click('#auth-btn');
     await page.waitForSelector('#page-main.active', { timeout: 15000 });
     await page.screenshot({ path: '/tmp/wm-list.png' });
-    await page.click('#chat-list .f-item');
+    await page.click('#chat-list .f-item:has-text("Стая")');
     await page.waitForTimeout(1500);
     await page.screenshot({ path: '/tmp/wm-chat.png' });
     await page.click('#btn-back');

@@ -100,7 +100,7 @@ end $$;
 create table if not exists public.chats (
     room_id    text primary key,
     name       text not null default '',
-    kind       text not null default 'dm',        -- 'dm' | 'group' | 'channel'
+    kind       text not null default 'dm',        -- 'dm' | 'group' | 'channel' | 'saved'
     members    text[] not null default '{}',
     created_at timestamptz not null default now()
 );

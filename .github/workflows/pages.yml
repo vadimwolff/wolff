@@ -26,7 +26,7 @@ jobs:
       - name: Собрать статическую папку
         run: |
           mkdir -p _site
-          cp index.html sw.js _site/
+          cp index.html 404.html sw.js manifest.webmanifest _site/
           cp -r assets _site/
           # Jekyll не нужен, иначе он может съесть служебные файлы
           touch _site/.nojekyll

@@ -70,12 +70,32 @@ const ann = await signUp(BASE, RUN + 'ann', 'Аня');
 const ben = await signUp(BASE, RUN + 'ben', 'Бен');
 
 await step('при регистрации создаются ключи устройства', async () => {
-    const identity = await ann.page.evaluate(() => {
-        const raw = localStorage.getItem('WM_IDENTITY');
-        return raw ? JSON.parse(raw) : null;
-    });
+    const identity = await ann.page.evaluate(() => new Promise((resolve) => {
+        const req = indexedDB.open('wolffmsg', 1);
+        req.onsuccess = () => {
+            const get = req.result.transaction('keys', 'readonly').objectStore('keys').get('identity');
+            get.onsuccess = () => {
+                const rec = get.result;
+                resolve(rec ? {
+                    publicKey: rec.publicKey,
+                    type: rec.privateKey && rec.privateKey.type,
+                    extractable: rec.privateKey && rec.privateKey.extractable,
+                    vault: !!(rec.vault && rec.vault.wrapped)
+                } : null);
+            };
+            get.onerror = () => resolve(null);
+        };
+        req.onerror = () => resolve(null);
+    }));
+
     assert(identity && identity.publicKey, 'открытый ключ не сохранён на устройстве');
-    assert(identity.privateJwk && identity.privateJwk.d, 'закрытый ключ не сохранён на устройстве');
+    assert(identity.type === 'private', 'закрытый ключ не сохранён на устройстве');
+    assert(identity.vault, 'копия ключа под паролем не сохранена — смена пароля потеряет переписку');
+
+    // Ключ хранится «неизвлекаемым»: даже свой же код не может его выгрузить.
+    assert(identity.extractable === false, 'закрытый ключ можно выгрузить из хранилища');
+    const raw = await ann.page.evaluate(() => localStorage.getItem('WM_IDENTITY'));
+    assert(!raw, 'закрытый ключ остался в localStorage открытым текстом');
 
     const rows = await rawApi(ann.page, '/profiles?nickname=eq.' + RUN + 'ann&select=id,public_key');
     assert(rows[0] && rows[0].public_key === identity.publicKey, 'открытый ключ не попал в профиль');

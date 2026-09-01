@@ -252,7 +252,7 @@ await step('в канале не показывается состав подп�
 
 await step('манифест и иконки готовы к установке', async () => {
     const manifest = await kate.page.evaluate(async () => {
-        const res = await fetch('assets/manifest.webmanifest');
+        const res = await fetch('manifest.webmanifest');
         return res.json();
     });
     assert(manifest.display === 'standalone', 'display: ' + manifest.display);
