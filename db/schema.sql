@@ -191,6 +191,28 @@ exception when others then
     raise notice 'Индекс вложений не создан: %', sqlerrm;
 end $$;
 
+-- ------------------------------------------------ подписки на уведомления ---
+--
+-- Адрес, по которому браузер получает уведомления при закрытом приложении.
+-- Таблица закрыта полностью: и запись, и чтение идут только через функции
+-- wm_push_save / wm_push_targets, поэтому чужие адреса нельзя ни прочитать,
+-- ни подменить, имея публичный ключ приложения.
+
+create table if not exists public.push_subscriptions (
+    endpoint   text primary key,
+    user_id    text not null,
+    p256dh     text not null,
+    auth       text not null,
+    updated_at timestamptz not null default now()
+);
+
+do $$
+begin
+    create index if not exists push_subs_user_idx on public.push_subscriptions (user_id);
+exception when others then
+    raise notice 'Индекс подписок на уведомления не создан: %', sqlerrm;
+end $$;
+
 -- ------------------------------------------- ключи чатов (по участникам) ---
 -- Для каждого участника лежит ключ комнаты, зашифрованный общим секретом ECDH.
 -- Без закрытого ключа участника строка бесполезна.
@@ -249,6 +271,7 @@ begin
            and p.proname in ('wm_register', 'wm_login', 'wm_set_password', 'wm_set_keys',
                              'wm_create_channel', 'wm_join_chat', 'wm_leave_chat',
                              'wm_search', 'wm_public_user', 'wm_user_keys',
+                             'wm_push_save', 'wm_push_drop', 'wm_push_targets',
                              'wm_guard_channel_post')
     loop
         execute 'drop function if exists ' || r.signature || ' cascade';
@@ -558,6 +581,109 @@ begin
 end;
 $$;
 
+-- ============================================================================
+--  Уведомления при закрытом приложении
+--
+--  wm_push_save    — браузер сохраняет свой адрес доставки;
+--  wm_push_drop    — адрес удаляется, когда браузер от него отказался;
+--  wm_push_targets — по номеру сообщения возвращает адреса тех, кому его
+--                    следует доставить. Функция сама проверяет, что сообщение
+--                    действительно существует и только что написано, поэтому
+--                    послать уведомление «просто так» через неё нельзя.
+--
+--  Текст сообщения наружу не отдаётся: он зашифрован, и в уведомлении
+--  показывается только имя отправителя.
+-- ============================================================================
+
+create or replace function public.wm_push_save(
+    p_user text, p_endpoint text, p_p256dh text, p_auth text
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public, extensions, pg_temp
+as $$
+begin
+    if coalesce(p_user, '') = '' or coalesce(p_endpoint, '') = '' then
+        return jsonb_build_object('ok', false, 'error', 'bad_request');
+    end if;
+
+    insert into public.push_subscriptions (endpoint, user_id, p256dh, auth)
+         values (p_endpoint, p_user, coalesce(p_p256dh, ''), coalesce(p_auth, ''))
+    on conflict (endpoint) do update
+            set user_id    = excluded.user_id,
+                p256dh     = excluded.p256dh,
+                auth       = excluded.auth,
+                updated_at = now();
+
+    return jsonb_build_object('ok', true);
+end;
+$$;
+
+create or replace function public.wm_push_drop(p_endpoint text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, extensions, pg_temp
+as $$
+begin
+    delete from public.push_subscriptions where endpoint = p_endpoint;
+    return jsonb_build_object('ok', true);
+end;
+$$;
+
+create or replace function public.wm_push_targets(p_msg bigint)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, extensions, pg_temp
+as $$
+declare
+    v_msg     record;
+    v_chat    record;
+    v_title   text;
+    v_targets jsonb;
+begin
+    select id, room_id, user_id, user_name, created_at
+      into v_msg
+      from public.messages
+     where id = p_msg;
+
+    -- Нет такого сообщения или оно давно написано — рассылать нечего.
+    if v_msg.id is null or v_msg.created_at < now() - interval '5 minutes' then
+        return jsonb_build_object('ok', false, 'error', 'not_found', 'targets', '[]'::jsonb);
+    end if;
+
+    select room_id, name, kind, members, owner_id
+      into v_chat
+      from public.chats
+     where room_id = v_msg.room_id;
+
+    v_title := case
+        when v_chat.kind in ('group', 'channel') and coalesce(v_chat.name, '') <> ''
+            then v_chat.name
+        else coalesce(v_msg.user_name, 'WolffMsg')
+    end;
+
+    select coalesce(jsonb_agg(jsonb_build_object(
+               'endpoint', s.endpoint,
+               'p256dh',   s.p256dh,
+               'auth',     s.auth
+           )), '[]'::jsonb)
+      into v_targets
+      from public.push_subscriptions s
+     where s.user_id = any (coalesce(v_chat.members, '{}'))
+       and s.user_id is distinct from v_msg.user_id;
+
+    return jsonb_build_object(
+        'ok', true,
+        'room', v_msg.room_id,
+        'msg', v_msg.id,
+        'title', v_title,
+        'targets', v_targets
+    );
+end;
+$$;
+
 /* В канале пишет только автор — проверка на стороне базы, а не только в UI. */
 create or replace function public.wm_guard_channel_post()
 returns trigger
@@ -602,6 +728,7 @@ alter table public.messages   enable row level security;
 alter table public.room_reads enable row level security;
 alter table public.room_keys   enable row level security;
 alter table public.attachments enable row level security;
+alter table public.push_subscriptions enable row level security;
 
 drop policy if exists wm_profiles_read   on public.profiles;
 drop policy if exists wm_profiles_write  on public.profiles;
@@ -636,6 +763,13 @@ grant execute on function public.wm_create_channel(text, text, text, text)  to a
 grant execute on function public.wm_join_chat(text, text)                   to anon, authenticated;
 grant execute on function public.wm_leave_chat(text, text)                  to anon, authenticated;
 grant execute on function public.wm_search(text, text)                      to anon, authenticated;
+grant execute on function public.wm_push_save(text, text, text, text)      to anon, authenticated;
+grant execute on function public.wm_push_drop(text)                        to anon, authenticated;
+grant execute on function public.wm_push_targets(bigint)                   to anon, authenticated;
+
+-- Сама таблица подписок недоступна: ни прочитать чужие адреса, ни записать
+-- их напрямую нельзя — только через функции выше.
+revoke all on public.push_subscriptions from anon, authenticated;
 
 -- Доступ к profiles закрываем ТОЛЬКО если функции входа действительно созданы.
 -- Иначе приложение осталось бы и без функций, и без прямой записи — именно так
@@ -676,8 +810,8 @@ select
       where n.nspname = 'public' and p.proname in
             ('wm_register', 'wm_login', 'wm_set_password',
              'wm_create_channel', 'wm_join_chat', 'wm_leave_chat', 'wm_search',
-             'wm_set_keys'))
-        as "функций создано (нужно 8)",
+             'wm_set_keys', 'wm_push_save', 'wm_push_drop', 'wm_push_targets'))
+        as "функций создано (нужно 11)",
     (select count(*) from public.profiles)  as "профилей в базе",
     (select count(*) from public.messages)  as "сообщений в базе",
     (select count(*) from information_schema.role_table_grants

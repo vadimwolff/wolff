@@ -94,6 +94,8 @@
         busy: false,
         kbManual: false,
         installTab: 'desktop',
+        pushServer: undefined,  // адрес сервера уведомлений: null — его нет
+        pushTask: null,
         firstChatPaint: true,
         serverChats: true,
         hasPreviews: true,
@@ -1080,6 +1082,7 @@
         confirmBox('Выйти из аккаунта?', 'Локальные данные на этом устройстве будут удалены, ' +
             'включая коды шифрования чатов.', 'Выйти', function () {
             stopTimers();
+            disablePush();                 // чужие уведомления на это устройство не приходят
             state.identity = null;
             state.vault = null;
             state.keys = {};
@@ -1088,7 +1091,8 @@
                     if (k.indexOf('WM_') === 0 && k !== LS.theme && k !== LS.api) localStorage.removeItem(k);
                 });
             } catch (e) { /* no-op */ }
-            idbDelete('identity').then(function () { location.reload(); });
+            Promise.all([idbDelete('identity'), idbDelete('prefs')])
+                .then(function () { location.reload(); });
         });
     }
 
@@ -1102,7 +1106,8 @@
                     .then(function () { return request('/profiles?id=eq.' + q(id), { method: 'DELETE' }); })
                     .then(function () {
                         localStorage.clear();
-                        return idbDelete('identity');
+                        disablePush();
+                        return Promise.all([idbDelete('identity'), idbDelete('prefs')]);
                     })
                     .then(function () { location.reload(); })
                     .catch(function (e) { toast(e.message || 'Не удалось удалить аккаунт'); });
@@ -1395,6 +1400,13 @@
         var all = prefs();
         all[room] = Object.assign({ pinned: false, muted: false }, all[room], patch);
         writeJSON(LS.prefs, all);
+        mirrorPrefs(all);
+    }
+
+    /* Копия настроек в базе браузера: её читает service worker, когда решает,
+       показывать ли уведомление о сообщении из отключённого чата. */
+    function mirrorPrefs(all) {
+        idbPut('prefs', all || prefs()).catch(function () { /* не критично */ });
     }
 
     function localReads() { return readJSON(LS.reads, {}); }
@@ -2909,6 +2921,7 @@
             }
             if (state.activeRoom === room) { renderMessages(false); cacheMessages(room); }
             markRead(room, stamp);
+            if (saved && saved.id) pingPush(saved.id);
         }).catch(function (err) {
             temp.pending = false;
             temp.failed = true;
@@ -3617,6 +3630,118 @@
         toast(on ? 'Звук новых сообщений включён' : 'Звук выключен');
     }
 
+    /* ------------------------------------ уведомления при закрытом приложении
+
+       Браузер получает их не от приложения, а от службы доставки: приложению
+       для этого нужен сервер, который умеет их рассылать. Такой сервер живёт
+       рядом с прокси базы — по адресу /api/push. Если его нет, всё остальное
+       работает по-прежнему, просто уведомления приходят только пока
+       приложение запущено. */
+
+    function pushUrls() {
+        var list = [];
+        var add = function (url) { if (url && list.indexOf(url) < 0) list.push(url); };
+
+        if (CFG.pushUrl) add(String(CFG.pushUrl).replace(/\/+$/, ''));
+        if (api.base && /\/api\/db$/.test(api.base)) add(api.base.replace(/\/api\/db$/, '/api/push'));
+        add(new URL('api/push', location.href).href.replace(/\/+$/, ''));
+        return list;
+    }
+
+    /* Адрес сервера уведомлений ищем один раз и запоминаем на время сессии. */
+    function findPushServer() {
+        if (state.pushServer !== undefined) return Promise.resolve(state.pushServer);
+        if (state.pushTask) return state.pushTask;
+
+        var urls = pushUrls();
+        var step = function (i) {
+            if (i >= urls.length) return null;
+            return fetchTimeout(urls[i], { method: 'GET' }, 6000)
+                .then(function (res) { return res.ok ? res.json() : null; })
+                .then(function (info) {
+                    if (info && info.ok && info.vapid) return { url: urls[i], vapid: info.vapid };
+                    return step(i + 1);
+                })
+                .catch(function () { return step(i + 1); });
+        };
+
+        state.pushTask = step(0).then(function (found) {
+            state.pushServer = found || null;
+            state.pushTask = null;
+            return state.pushServer;
+        });
+        return state.pushTask;
+    }
+
+    function base64ToBytes(base64) {
+        var padded = String(base64).replace(/-/g, '+').replace(/_/g, '/');
+        while (padded.length % 4) padded += '=';
+        var raw = atob(padded);
+        var out = new Uint8Array(raw.length);
+        for (var i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+        return out;
+    }
+
+    function subscriptionFields(sub) {
+        var json = sub.toJSON ? sub.toJSON() : {};
+        var keys = json.keys || {};
+        return { endpoint: json.endpoint || sub.endpoint, p256dh: keys.p256dh || '', auth: keys.auth || '' };
+    }
+
+    /* Подписка на доставку: адрес браузера сохраняется в базе. */
+    function enablePush() {
+        if (!navigator.serviceWorker || typeof PushManager === 'undefined' || !state.me) {
+            return Promise.resolve(false);
+        }
+        return findPushServer().then(function (server) {
+            if (!server) return false;
+            return navigator.serviceWorker.ready.then(function (reg) {
+                return reg.pushManager.getSubscription().then(function (existing) {
+                    if (existing) return existing;
+                    return reg.pushManager.subscribe({
+                        userVisibleOnly: true,
+                        applicationServerKey: base64ToBytes(server.vapid)
+                    });
+                });
+            }).then(function (sub) {
+                var fields = subscriptionFields(sub);
+                return rpc('wm_push_save', {
+                    p_user: state.me.id,
+                    p_endpoint: fields.endpoint,
+                    p_p256dh: fields.p256dh,
+                    p_auth: fields.auth
+                }).then(function () { return true; });
+            });
+        }).catch(function () { return false; });
+    }
+
+    function disablePush() {
+        if (!navigator.serviceWorker || !navigator.serviceWorker.controller) return Promise.resolve();
+        return navigator.serviceWorker.ready.then(function (reg) {
+            return reg.pushManager.getSubscription();
+        }).then(function (sub) {
+            if (!sub) return null;
+            var endpoint = subscriptionFields(sub).endpoint;
+            return sub.unsubscribe().then(function () {
+                return rpc('wm_push_drop', { p_endpoint: endpoint }).catch(function () { return null; });
+            });
+        }).catch(function () { return null; });
+    }
+
+    /* Просим сервер разослать уведомление о только что отправленном сообщении.
+       Ответ не важен: если сервера нет, всё остальное работает как прежде. */
+    function pingPush(msgId) {
+        if (state.pushServer === null) return;
+        findPushServer().then(function (server) {
+            if (!server) return;
+            fetchTimeout(server.url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ msg: msgId })
+            }, 8000).catch(function () { /* уведомление — не критично */ });
+        });
+    }
+
     function updateNotifyPill() {
         var pill = $('notify-state');
         if (!pill) return;
@@ -3643,6 +3768,7 @@
         if (notifyEnabled()) {
             localStorage.setItem(LS.notify, 'off');
             updateNotifyPill();
+            disablePush();
             toast('Уведомления выключены');
             return;
         }
@@ -3651,14 +3777,20 @@
             return;
         }
         Notification.requestPermission().then(function (result) {
-            if (result === 'granted') {
-                localStorage.setItem(LS.notify, 'on');
-                toast('Уведомления включены');
-                showNotification('WolffMsg', 'Уведомления работают', null, null);
-            } else {
+            if (result !== 'granted') {
                 toast('Уведомления не разрешены');
+                updateNotifyPill();
+                return;
             }
+            localStorage.setItem(LS.notify, 'on');
             updateNotifyPill();
+            showNotification('WolffMsg', 'Уведомления работают', null, null);
+
+            enablePush().then(function (background) {
+                toast(background
+                    ? 'Уведомления включены — приходят и при закрытом приложении'
+                    : 'Уведомления включены');
+            });
         });
     }
 
@@ -3666,7 +3798,7 @@
         var options = {
             body: body || '',
             icon: 'assets/icon-192.png',
-            badge: 'assets/icon-192.png',
+            badge: 'assets/badge-96.png',      // одноцветный значок строки состояния
             tag: room || 'wolffmsg',
             renotify: true,
             data: { room: room, msg: msgId }
@@ -3872,6 +4004,8 @@
         renderThemes();
         state.chats = mergeChats([]);
         ensureSaved();
+        mirrorPrefs();
+        if (notifyEnabled()) enablePush();      // подписка могла устареть
         paintCachedChatList();
         renderChatList();
         syncChats();
@@ -4228,8 +4362,10 @@
         openFromNotification: function (room, msg) { openFromNotification(room, msg); },
         reconnect: reconnect,
         openConnection: openConnection,
+        findPushServer: findPushServer,
         state: state,
-        api: api
+        api: api,
+        rpc: rpc
     };
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

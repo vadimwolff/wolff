@@ -47,8 +47,16 @@ const db = {
     messages: [],
     room_reads: [],
     room_keys: [],
-    attachments: []
+    attachments: [],
+    push_subscriptions: []
 };
+
+/* Что ушло на сервер уведомлений: тесты смотрят сюда. */
+const pushLog = [];
+
+/* Открытый ключ подписки — настоящий по виду, но выдуманный: в стенде
+   уведомления никуда не отправляются. */
+const MOCK_VAPID = 'BDOWGXA08bMq-yXbKASz2aESoUQlpMXv9jR6ZjjXO4jaZTFA5j91SdguNu0og11xM9D7ph8Csm-hkm4ws9ak6gw';
 
 let messageSeq = 1;
 let attachmentSeq = 1;
@@ -273,6 +281,33 @@ const rpcs = {
         return { channels, users };
     },
 
+    wm_push_save({ p_user, p_endpoint, p_p256dh, p_auth }) {
+        if (!p_user || !p_endpoint) return { ok: false, error: 'bad_request' };
+        const rows = db.push_subscriptions.filter((s) => s.endpoint !== p_endpoint);
+        rows.push({ endpoint: p_endpoint, user_id: p_user, p256dh: p_p256dh || '', auth: p_auth || '' });
+        db.push_subscriptions = rows;
+        return { ok: true };
+    },
+
+    wm_push_drop({ p_endpoint }) {
+        db.push_subscriptions = db.push_subscriptions.filter((s) => s.endpoint !== p_endpoint);
+        return { ok: true };
+    },
+
+    wm_push_targets({ p_msg }) {
+        const msg = db.messages.find((m) => String(m.id) === String(p_msg));
+        if (!msg) return { ok: false, error: 'not_found', targets: [] };
+        const fresh = Date.now() - new Date(msg.created_at).getTime() < 5 * 60 * 1000;
+        if (!fresh) return { ok: false, error: 'not_found', targets: [] };
+
+        const chat = db.chats.find((c) => c.room_id === msg.room_id) || { members: [] };
+        const title = (chat.kind === 'group' || chat.kind === 'channel') && chat.name
+            ? chat.name : (msg.user_name || 'WolffMsg');
+        const targets = db.push_subscriptions.filter(
+            (s) => (chat.members || []).includes(s.user_id) && s.user_id !== msg.user_id);
+        return { ok: true, room: msg.room_id, msg: msg.id, title, targets };
+    },
+
     wm_set_keys({ p_nickname, p_password, p_public_key, p_enc_private_key, p_key_salt }) {
         const check = rpcs.wm_login({ p_nickname, p_password });
         if (!check.ok) return { ok: false, error: 'bad_password' };
@@ -465,6 +500,23 @@ function handleApi(req, res, rest, body) {
 
 const server = http.createServer((req, res) => {
     if (req.method === 'OPTIONS') return json(res, 204, null);
+
+    // Сервер уведомлений: отдаёт ключ и записывает, о чём его попросили.
+    if (req.url.split('?')[0] === '/api/push') {
+        if (req.method === 'GET') {
+            if (req.url.includes('log=1')) return json(res, 200, { pings: pushLog });
+            return json(res, 200, { ok: true, vapid: MOCK_VAPID });
+        }
+        let body = '';
+        req.on('data', (c) => { body += c; });
+        req.on('end', () => {
+            let parsed = null;
+            try { parsed = JSON.parse(body || '{}'); } catch { parsed = null; }
+            if (parsed && parsed.msg) pushLog.push({ msg: String(parsed.msg), at: Date.now() });
+            json(res, 200, { ok: true, sent: 0 });
+        });
+        return undefined;
+    }
 
     // и /rest/v1/... (прямой Supabase), и /api/db/... (прокси на домене сайта)
     const match = req.url.match(/^\/(?:rest\/v1|api\/db)(\/.*)$/);

@@ -2,7 +2,7 @@
    Оболочка приложения отдаётся из кэша мгновенно, а свежая версия
    подтягивается в фоне. Запросы к API не кэшируются никогда. */
 
-var CACHE = 'wolffmsg-v55-1';
+var CACHE = 'wolffmsg-v56-1';
 
 var SHELL = [
     './',
@@ -14,7 +14,8 @@ var SHELL = [
     './assets/crypto.js',
     './assets/icon.svg',
     './assets/icon-192.png',
-    './assets/icon-512.png'
+    './assets/icon-512.png',
+    './assets/badge-96.png'
 ];
 
 self.addEventListener('install', function (event) {
@@ -115,19 +116,55 @@ self.addEventListener('notificationclick', function (event) {
     );
 });
 
-/* Push с сервера (когда он появится): показываем то же уведомление. */
+/* Настройки чатов приложение дублирует в базу браузера: сюда, в service
+   worker, localStorage не виден, а знать про отключённый звук нужно. */
+function readPrefs() {
+    return new Promise(function (resolve) {
+        if (!self.indexedDB) { resolve({}); return; }
+        var req = indexedDB.open('wolffmsg', 1);
+        req.onsuccess = function () {
+            try {
+                var db = req.result;
+                if (!db.objectStoreNames.contains('keys')) { resolve({}); return; }
+                var get = db.transaction('keys', 'readonly').objectStore('keys').get('prefs');
+                get.onsuccess = function () { resolve(get.result || {}); };
+                get.onerror = function () { resolve({}); };
+            } catch (e) { resolve({}); }
+        };
+        req.onerror = function () { resolve({}); };
+        req.onblocked = function () { resolve({}); };
+    });
+}
+
+/* Уведомление о новом сообщении, когда приложение закрыто или свёрнуто. */
 self.addEventListener('push', function (event) {
     var payload = {};
     try { payload = event.data ? event.data.json() : {}; } catch (e) { payload = {}; }
 
-    var title = payload.title || 'WolffMsg';
-    var options = {
-        body: payload.body || 'Новое сообщение',
-        icon: './assets/icon-192.png',
-        badge: './assets/icon-192.png',
-        tag: payload.room || 'wolffmsg',
-        renotify: true,
-        data: { room: payload.room, msg: payload.msg }
-    };
-    event.waitUntil(self.registration.showNotification(title, options));
+    var show = Promise.all([
+        readPrefs(),
+        self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+    ]).then(function (res) {
+        var prefs = res[0] || {};
+        var clients = res[1] || [];
+
+        // Чат отключён человеком — молчим.
+        if (payload.room && prefs[payload.room] && prefs[payload.room].muted) return null;
+
+        // Приложение открыто на экране: там уже есть свои уведомления и звук.
+        for (var i = 0; i < clients.length; i++) {
+            if (clients[i].visibilityState === 'visible' && clients[i].focused) return null;
+        }
+
+        return self.registration.showNotification(payload.title || 'WolffMsg', {
+            body: payload.body || 'Новое сообщение',
+            icon: './assets/icon-192.png',
+            badge: './assets/badge-96.png',
+            tag: payload.room || 'wolffmsg',
+            renotify: true,
+            data: { room: payload.room, msg: payload.msg }
+        });
+    });
+
+    event.waitUntil(show);
 });
