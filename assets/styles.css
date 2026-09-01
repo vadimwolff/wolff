@@ -1426,3 +1426,30 @@ body.no-motion *::after {
 .chat-head { cursor: pointer; }
 .chat-head:active { opacity: 0.6; }
 .bubble .author { cursor: pointer; }
+
+/* состояние шифрования */
+.crypto-state {
+    font-size: 16px;
+    font-weight: 700;
+    margin: 0 0 6px;
+}
+
+.crypto-state.on { color: #2fa95a; }
+.crypto-state.off { color: var(--text-muted); }
+
+.fingerprint {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 15px;
+    letter-spacing: 1px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px;
+    text-align: center;
+    margin-bottom: 10px;
+    word-break: break-all;
+}
+
+#crypto-off { width: 100%; margin-bottom: 8px; }
+#crypto-off[hidden] { display: none; }
+#crypto-code-box[hidden] { display: none; }

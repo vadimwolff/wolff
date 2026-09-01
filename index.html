@@ -181,16 +181,16 @@
 
 <div id="crypto-modal" class="modal-overlay">
     <div class="modal-sheet">
-        <h3>Шифрование чата</h3>
-        <p class="muted small">Придумайте секретный код и сообщите его собеседнику любым другим
-            способом. Сообщения будут шифроваться на устройстве — на сервере остаётся только
-            нечитаемый набор символов. Без кода переписку не прочитает никто, включая владельца базы.</p>
-        <input type="password" id="crypto-code" class="auth-input" placeholder="секретный код чата"
-               autocomplete="off" autocapitalize="none">
-        <div class="sheet-row">
-            <button type="button" class="btn-flat" id="crypto-off">Выключить</button>
-            <button type="button" class="btn-primary" id="crypto-save">Включить</button>
+        <h3>Шифрование</h3>
+        <p id="crypto-state" class="crypto-state">Проверяем…</p>
+        <p class="muted small" id="crypto-note"></p>
+        <div id="crypto-code-box" hidden>
+            <p class="group-title" style="margin:14px 0 6px">КОД БЕЗОПАСНОСТИ</p>
+            <div id="crypto-fingerprint" class="fingerprint"></div>
+            <p class="muted small">Сверьте этот код с собеседником при личной встрече или по
+                другому каналу. Если коды совпадают, переписку читаете только вы двое.</p>
         </div>
+        <button type="button" class="btn-flat" id="crypto-off" hidden>Убрать старый код чата</button>
         <div class="modal-item cancel" id="crypto-close">Закрыть</div>
     </div>
 </div>

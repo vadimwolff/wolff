@@ -138,66 +138,17 @@ await step('выделение текста переживает обновле�
     assert(stillSelected, 'выделение текста сбрасывается при обновлении');
 });
 
-await step('шифрование: сервер видит только шифртекст', async () => {
-    await author.page.click('#btn-chat-menu');
-    await author.page.click('#act-crypto');
-    await author.page.fill('#crypto-code', 'общий-секрет-42');
-    await author.page.click('#crypto-save');
-    await author.page.waitForFunction(() => !document.getElementById('chat-lock').hidden, null, { timeout: 10000 });
-
-    await author.page.fill('#m-input', 'Секретное сообщение');
-    await author.page.click('#btn-send');
-    await author.page.waitForSelector('.bubble.out:not(.pending)', { timeout: 20000 });
-
-    // читаем то, что реально лежит на сервере
-    const raw = await author.page.evaluate(async () => {
-        const base = window.WM.api.base;
-        const room = window.WM.state.activeRoom;
-        const key = window.WM_CONFIG.apiKey;
-        const res = await fetch(base + '/messages?room_id=eq.' + encodeURIComponent(room) +
-            '&select=text&order=created_at.desc&limit=1',
-            { headers: { apikey: key, Authorization: 'Bearer ' + key } });
-        return (await res.json())[0].text;
-    });
-    assert(raw.startsWith('wm1:'), 'сообщение ушло на сервер незашифрованным: ' + raw.slice(0, 40));
-    assert(!raw.includes('Секретное'), 'в шифртексте виден исходный текст');
-});
-
-await step('без кода собеседник видит замок, с кодом — текст', async () => {
-    await reader.page.waitForFunction(
-        () => [...document.querySelectorAll('.bubble.in')].some((e) => e.querySelector('.locked')),
-        null, { timeout: 25000 });
-
-    await reader.page.click('#btn-chat-menu');
-    await reader.page.click('#act-crypto');
-    await reader.page.fill('#crypto-code', 'общий-секрет-42');
-    await reader.page.click('#crypto-save');
-
-    await reader.page.waitForFunction(
-        () => [...document.querySelectorAll('.bubble.in .text')]
-            .some((e) => e.textContent.includes('Секретное сообщение')), null, { timeout: 25000 });
-});
-
-await step('неверный код не расшифровывает переписку', async () => {
-    const ctx = await browser.newContext({ serviceWorkers: 'block' });
-    const page = await ctx.newPage();
-    await page.goto(BASE + '/');
-    await page.fill('#a-nick', RUN + 'reader');
-    await page.fill('#a-pass', 'pass1234');
-    await page.click('#auth-btn');
-    await page.waitForSelector('#page-main.active', { timeout: 20000 });
-    await page.click('#chat-list .f-item:has-text("Автор")');
-    await page.click('#btn-chat-menu');
-    await page.click('#act-crypto');
-    await page.fill('#crypto-code', 'неправильный-код');
-    await page.click('#crypto-save');
-    await page.waitForFunction(
-        () => [...document.querySelectorAll('.bubble')].some((e) => e.querySelector('.locked')),
-        null, { timeout: 25000 });
-    const leaked = await page.evaluate(
-        () => document.getElementById('msg-list').textContent.includes('Секретное сообщение'));
-    assert(!leaked, 'сообщение расшифровалось неверным кодом');
-    await ctx.close();
+await step('в списке чатов видна расшифрованная подпись', async () => {
+    await reader.page.click('#btn-back');
+    await reader.page.waitForFunction(() => {
+        const item = [...document.querySelectorAll('#chat-list .f-item')]
+            .find((e) => e.textContent.includes('Автор'));
+        if (!item) return false;
+        const preview = item.querySelector('.chat-info small').textContent;
+        return preview.includes('Здравствуйте') || preview.includes('Отвеч');
+    }, null, { timeout: 30000 });
+    await reader.page.click('#chat-list .f-item:has-text("Автор")');
+    await reader.page.waitForSelector('#page-chat.active', { timeout: 15000 });
 });
 
 await step('мгновенная отрисовка чата из кэша', async () => {

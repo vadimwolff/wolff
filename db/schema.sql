@@ -45,6 +45,12 @@ alter table public.profiles add column if not exists password      text;
 alter table public.profiles add column if not exists password_hash text;
 alter table public.profiles add column if not exists created_at    timestamptz default now();
 
+-- ключи сквозного шифрования: открытый ключ виден всем, закрытый хранится
+-- только в зашифрованном виде и расшифровывается паролем на устройстве
+alter table public.profiles add column if not exists public_key      text;
+alter table public.profiles add column if not exists enc_private_key text;
+alter table public.profiles add column if not exists key_salt        text;
+
 update public.profiles set name = coalesce(nullif(name, ''), nickname) where name is null or name = '';
 update public.profiles set avatar = coalesce(avatar, '') where avatar is null;
 update public.profiles set created_at = now() where created_at is null;
@@ -150,6 +156,10 @@ alter table public.messages add column if not exists reply_to      text;
 alter table public.messages add column if not exists reply_name    text;
 alter table public.messages add column if not exists reply_preview text;
 
+-- короткая подпись для списка чатов: шифруется отдельно от самого сообщения,
+-- иначе в списке пришлось бы расшифровывать целые фотографии
+alter table public.messages add column if not exists preview text;
+
 update public.messages set reactions = '{}'::jsonb where reactions is null;
 
 do $$
@@ -158,6 +168,18 @@ begin
 exception when others then
     raise notice 'Индекс по сообщениям не создан: %', sqlerrm;
 end $$;
+
+-- ------------------------------------------- ключи чатов (по участникам) ---
+-- Для каждого участника лежит ключ комнаты, зашифрованный общим секретом ECDH.
+-- Без закрытого ключа участника строка бесполезна.
+create table if not exists public.room_keys (
+    room_id     text not null,
+    user_id     text not null,
+    wrapped_key text not null,
+    wrapped_by  text,
+    created_at  timestamptz not null default now(),
+    primary key (room_id, user_id)
+);
 
 -- --------------------------------------------------- отметки о прочтении ---
 create table if not exists public.room_reads (
@@ -175,7 +197,9 @@ select distinct on (m.room_id)
     m.user_id,
     m.user_name,
     case
+        when m.preview is not null then m.preview
         when m.text like 'data:image/%' then '📷 Фото'
+        when m.text like 'wm1:%' then '🔒'
         else left(coalesce(m.text, ''), 120)
     end as preview,
     m.created_at
@@ -188,6 +212,14 @@ order by m.room_id, m.created_at desc;
 --  search_path включает extensions — там в Supabase живёт pgcrypto.
 -- ============================================================================
 
+/* Закрытые ключи отдаются только владельцу — через вход, не через таблицу. */
+create or replace function public.wm_user_keys(p public.profiles)
+returns json language sql immutable as $$
+    select json_build_object('public_key', p.public_key,
+                             'enc_private_key', p.enc_private_key,
+                             'key_salt', p.key_salt);
+$$;
+
 create or replace function public.wm_public_user(p public.profiles)
 returns json language sql immutable as $$
     select json_build_object('id', p.id, 'nickname', p.nickname,
@@ -195,7 +227,13 @@ returns json language sql immutable as $$
                              'avatar', coalesce(p.avatar, ''));
 $$;
 
-create or replace function public.wm_register(p_nickname text, p_password text, p_name text)
+create or replace function public.wm_register(
+    p_nickname        text,
+    p_password        text,
+    p_name            text,
+    p_public_key      text default null,
+    p_enc_private_key text default null,
+    p_key_salt        text default null)
 returns json
 language plpgsql
 security definer
@@ -215,15 +253,18 @@ begin
         return json_build_object('ok', false, 'error', 'nickname_taken');
     end if;
 
-    insert into public.profiles (id, nickname, name, avatar, password_hash)
+    insert into public.profiles (id, nickname, name, avatar, password_hash,
+                                 public_key, enc_private_key, key_salt)
     values ('u' || floor(extract(epoch from now()) * 1000)::bigint || floor(random() * 1000)::int,
             v_nick,
             coalesce(nullif(trim(both ' ' from coalesce(p_name, '')), ''), v_nick),
             '',
-            crypt(p_password, gen_salt('bf')))
+            crypt(p_password, gen_salt('bf')),
+            p_public_key, p_enc_private_key, p_key_salt)
     returning * into v_row;
 
-    return json_build_object('ok', true, 'user', public.wm_public_user(v_row));
+    return json_build_object('ok', true, 'user', public.wm_public_user(v_row),
+                             'keys', public.wm_user_keys(v_row));
 end;
 $$;
 
@@ -246,7 +287,8 @@ begin
 
     if v_row.password_hash is not null then
         if v_row.password_hash = crypt(p_password, v_row.password_hash) then
-            return json_build_object('ok', true, 'user', public.wm_public_user(v_row));
+            return json_build_object('ok', true, 'user', public.wm_public_user(v_row),
+                                     'keys', public.wm_user_keys(v_row));
         end if;
         return json_build_object('ok', false, 'error', 'bad_password');
     end if;
@@ -256,14 +298,20 @@ begin
         update public.profiles
            set password_hash = crypt(p_password, gen_salt('bf')), password = null
          where id = v_row.id;
-        return json_build_object('ok', true, 'user', public.wm_public_user(v_row));
+        return json_build_object('ok', true, 'user', public.wm_public_user(v_row),
+                                 'keys', public.wm_user_keys(v_row));
     end if;
 
     return json_build_object('ok', false, 'error', 'bad_password');
 end;
 $$;
 
-create or replace function public.wm_set_password(p_nickname text, p_old_password text, p_new_password text)
+create or replace function public.wm_set_password(
+    p_nickname        text,
+    p_old_password    text,
+    p_new_password    text,
+    p_enc_private_key text default null,
+    p_key_salt        text default null)
 returns json
 language plpgsql
 security definer
@@ -283,10 +331,50 @@ begin
     end if;
 
     update public.profiles
-       set password_hash = crypt(p_new_password, gen_salt('bf')), password = null
+       set password_hash = crypt(p_new_password, gen_salt('bf')),
+           password = null,
+           enc_private_key = coalesce(p_enc_private_key, enc_private_key),
+           key_salt = coalesce(p_key_salt, key_salt)
      where nickname = lower(trim(both ' ' from p_nickname))
     returning * into v_row;
 
+    return json_build_object('ok', true, 'user', public.wm_public_user(v_row));
+end;
+$$;
+
+/* Выдача ключей аккаунту, созданному до появления шифрования.
+   Требует пароль — иначе чужие ключи подменить нельзя. */
+create or replace function public.wm_set_keys(
+    p_nickname        text,
+    p_password        text,
+    p_public_key      text,
+    p_enc_private_key text,
+    p_key_salt        text)
+returns json
+language plpgsql
+security definer
+set search_path = public, extensions, pg_temp
+as $$
+declare
+    v_check json;
+    v_row   public.profiles;
+begin
+    v_check := public.wm_login(p_nickname, p_password);
+    if (v_check ->> 'ok')::boolean is not true then
+        return json_build_object('ok', false, 'error', 'bad_password');
+    end if;
+
+    update public.profiles
+       set public_key = p_public_key,
+           enc_private_key = p_enc_private_key,
+           key_salt = p_key_salt
+     where nickname = lower(trim(both ' ' from p_nickname))
+       and public_key is null            -- уже выданные ключи не перезаписываем
+    returning * into v_row;
+
+    if v_row.id is null then
+        return json_build_object('ok', false, 'error', 'already_set');
+    end if;
     return json_build_object('ok', true, 'user', public.wm_public_user(v_row));
 end;
 $$;
@@ -461,29 +549,34 @@ alter table public.profiles   enable row level security;
 alter table public.chats      enable row level security;
 alter table public.messages   enable row level security;
 alter table public.room_reads enable row level security;
+alter table public.room_keys  enable row level security;
 
 drop policy if exists wm_profiles_read   on public.profiles;
 drop policy if exists wm_profiles_write  on public.profiles;
 drop policy if exists wm_chats_all       on public.chats;
 drop policy if exists wm_messages_all    on public.messages;
 drop policy if exists wm_reads_all       on public.room_reads;
+drop policy if exists wm_keys_all        on public.room_keys;
 
 create policy wm_profiles_read  on public.profiles   for select using (true);
 create policy wm_profiles_write on public.profiles   for update using (true) with check (true);
 create policy wm_chats_all      on public.chats      for all    using (true) with check (true);
 create policy wm_messages_all   on public.messages   for all    using (true) with check (true);
 create policy wm_reads_all      on public.room_reads for all    using (true) with check (true);
+create policy wm_keys_all       on public.room_keys  for all    using (true) with check (true);
 
 grant usage on schema public to anon, authenticated;
 grant select, insert, update, delete on public.chats         to anon, authenticated;
 grant select, insert, update, delete on public.messages      to anon, authenticated;
 grant select, insert, update, delete on public.room_reads    to anon, authenticated;
+grant select, insert, update, delete on public.room_keys     to anon, authenticated;
 grant select                         on public.chat_previews to anon, authenticated;
 grant usage, select on all sequences in schema public to anon, authenticated;
 
-grant execute on function public.wm_register(text, text, text)              to anon, authenticated;
+grant execute on function public.wm_register(text, text, text, text, text, text) to anon, authenticated;
 grant execute on function public.wm_login(text, text)                       to anon, authenticated;
-grant execute on function public.wm_set_password(text, text, text)          to anon, authenticated;
+grant execute on function public.wm_set_password(text, text, text, text, text)  to anon, authenticated;
+grant execute on function public.wm_set_keys(text, text, text, text, text)  to anon, authenticated;
 grant execute on function public.wm_create_channel(text, text, text, text)  to anon, authenticated;
 grant execute on function public.wm_join_chat(text, text)                   to anon, authenticated;
 grant execute on function public.wm_leave_chat(text, text)                  to anon, authenticated;
@@ -502,7 +595,9 @@ begin
 
     if v_funcs >= 2 then
         execute 'revoke all on public.profiles from anon, authenticated';
-        execute 'grant select (id, nickname, name, avatar, created_at) on public.profiles to anon, authenticated';
+        -- открытый ключ читают все, зашифрованный закрытый — никто:
+        -- он выдаётся только функцией входа своему владельцу
+        execute 'grant select (id, nickname, name, avatar, created_at, public_key) on public.profiles to anon, authenticated';
         execute 'grant update (name, avatar) on public.profiles to anon, authenticated';
         execute 'grant delete on public.profiles to anon, authenticated';
         raise notice 'Прямой доступ к паролям закрыт, вход работает через функции.';
@@ -525,8 +620,9 @@ select
     (select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace
       where n.nspname = 'public' and p.proname in
             ('wm_register', 'wm_login', 'wm_set_password',
-             'wm_create_channel', 'wm_join_chat', 'wm_leave_chat', 'wm_search'))
-        as "функций создано (нужно 7)",
+             'wm_create_channel', 'wm_join_chat', 'wm_leave_chat', 'wm_search',
+             'wm_set_keys'))
+        as "функций создано (нужно 8)",
     (select count(*) from public.profiles)  as "профилей в базе",
     (select count(*) from public.messages)  as "сообщений в базе",
     (select count(*) from information_schema.role_table_grants

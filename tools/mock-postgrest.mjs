@@ -36,14 +36,17 @@ let rpcCalls = 0;
 const OLD_CHATS = process.env.WM_OLDCHATS === '1';
 const OLD_COLUMNS = {
     chats: ['room_id', 'name', 'kind', 'members', 'created_at'],
-    messages: ['id', 'room_id', 'user_id', 'user_name', 'text', 'reactions', 'created_at']
+    messages: ['id', 'room_id', 'user_id', 'user_name', 'text', 'reactions', 'created_at'],
+    // в старой базе нет ни колонок ответа, ни короткого превью
+    profiles: ['id', 'nickname', 'name', 'avatar', 'password', 'created_at']
 };
 
 const db = {
     profiles: [],
     chats: [],
     messages: [],
-    room_reads: []
+    room_reads: [],
+    room_keys: []
 };
 
 let messageSeq = 1;
@@ -150,7 +153,9 @@ function chatPreviews() {
         id: m.id,
         user_id: m.user_id,
         user_name: m.user_name,
-        preview: String(m.text || '').startsWith('data:image/') ? '📷 Фото' : String(m.text || '').slice(0, 120),
+        preview: m.preview != null ? m.preview
+            : (String(m.text || '').startsWith('data:image/') ? '📷 Фото'
+                : (String(m.text || '').startsWith('wm1:') ? '🔒' : String(m.text || '').slice(0, 120))),
         created_at: m.created_at
     }));
 }
@@ -159,8 +164,16 @@ function publicUser(p) {
     return { id: p.id, nickname: p.nickname, name: p.name, avatar: p.avatar || '' };
 }
 
+function userKeys(p) {
+    return {
+        public_key: p.public_key || null,
+        enc_private_key: p.enc_private_key || null,
+        key_salt: p.key_salt || null
+    };
+}
+
 const rpcs = {
-    wm_register({ p_nickname, p_password, p_name }) {
+    wm_register({ p_nickname, p_password, p_name, p_public_key, p_enc_private_key, p_key_salt }) {
         const nick = String(p_nickname || '').trim().toLowerCase();
         if (!/^[a-z0-9_.]{3,32}$/.test(nick)) return { ok: false, error: 'bad_nickname' };
         if (String(p_password || '').length < 4) return { ok: false, error: 'weak_password' };
@@ -173,10 +186,13 @@ const rpcs = {
             avatar: '',
             password: null,
             password_hash: hash(p_password),
+            public_key: p_public_key || null,
+            enc_private_key: p_enc_private_key || null,
+            key_salt: p_key_salt || null,
             created_at: new Date().toISOString()
         };
         db.profiles.push(row);
-        return { ok: true, user: publicUser(row) };
+        return { ok: true, user: publicUser(row), keys: userKeys(row) };
     },
 
     wm_login({ p_nickname, p_password }) {
@@ -185,12 +201,13 @@ const rpcs = {
         if (!row) return { ok: false, error: 'not_found' };
         if (row.password_hash) {
             return row.password_hash === hash(p_password)
-                ? { ok: true, user: publicUser(row) } : { ok: false, error: 'bad_password' };
+                ? { ok: true, user: publicUser(row), keys: userKeys(row) }
+                : { ok: false, error: 'bad_password' };
         }
         if (row.password && row.password === p_password) {
             row.password_hash = hash(p_password);
             row.password = null;
-            return { ok: true, user: publicUser(row) };
+            return { ok: true, user: publicUser(row), keys: userKeys(row) };
         }
         return { ok: false, error: 'bad_password' };
     },
@@ -254,13 +271,26 @@ const rpcs = {
         return { channels, users };
     },
 
-    wm_set_password({ p_nickname, p_old_password, p_new_password }) {
+    wm_set_keys({ p_nickname, p_password, p_public_key, p_enc_private_key, p_key_salt }) {
+        const check = rpcs.wm_login({ p_nickname, p_password });
+        if (!check.ok) return { ok: false, error: 'bad_password' };
+        const row = db.profiles.find((p) => p.nickname === String(p_nickname).toLowerCase());
+        if (row.public_key) return { ok: false, error: 'already_set' };
+        row.public_key = p_public_key;
+        row.enc_private_key = p_enc_private_key;
+        row.key_salt = p_key_salt;
+        return { ok: true, user: publicUser(row) };
+    },
+
+    wm_set_password({ p_nickname, p_old_password, p_new_password, p_enc_private_key, p_key_salt }) {
         if (String(p_new_password || '').length < 4) return { ok: false, error: 'weak_password' };
         const check = rpcs.wm_login({ p_nickname, p_password: p_old_password });
         if (!check.ok) return { ok: false, error: 'bad_password' };
         const row = db.profiles.find((p) => p.nickname === String(p_nickname).toLowerCase());
         row.password_hash = hash(p_new_password);
         row.password = null;
+        if (p_enc_private_key) row.enc_private_key = p_enc_private_key;
+        if (p_key_salt) row.key_salt = p_key_salt;
         return { ok: true, user: publicUser(row) };
     }
 };
@@ -335,9 +365,12 @@ function handleApi(req, res, rest, body) {
     }
 
     if (OLD_CHATS) {
-        const newRpcs = ['wm_create_channel', 'wm_join_chat', 'wm_leave_chat', 'wm_search'];
+        const newRpcs = ['wm_create_channel', 'wm_join_chat', 'wm_leave_chat', 'wm_search', 'wm_set_keys'];
         if (parts[0] === 'rpc' && newRpcs.includes(parts[1])) {
             return json(res, 404, { code: 'PGRST202', message: 'function not found' });
+        }
+        if (parts[0] === 'room_keys') {
+            return json(res, 404, { code: 'PGRST205', message: 'relation not found' });
         }
         const allowed = OLD_COLUMNS[parts[0]];
         if (allowed) {

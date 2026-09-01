@@ -49,14 +49,32 @@ export default async function handler(request) {
         init.body = await request.text();
     }
 
+    /* Supabase изредка отвечает 5xx на холодном старте или при всплеске
+       нагрузки. Один тихий повтор здесь избавляет клиента от лишнего
+       переключения адреса и мигания «нет связи». */
+    async function callUpstream() {
+        return fetch(target, { ...init, signal: AbortSignal.timeout(20000) });
+    }
+
     let upstream;
     try {
-        upstream = await fetch(target, init);
+        upstream = await callUpstream();
+        if (upstream.status >= 500 && request.method === 'GET') {
+            await new Promise((r) => setTimeout(r, 250));
+            upstream = await callUpstream();
+        }
     } catch (err) {
-        return new Response(JSON.stringify({ message: 'upstream_unavailable', detail: String(err) }), {
-            status: 502,
-            headers: { ...CORS, 'content-type': 'application/json' }
-        });
+        // Повторяем только чтение: повтор записи мог бы создать дубль сообщения.
+        try {
+            if (request.method !== 'GET') throw err;
+            await new Promise((r) => setTimeout(r, 250));
+            upstream = await callUpstream();
+        } catch (retryErr) {
+            return new Response(JSON.stringify({ message: 'upstream_unavailable', detail: String(retryErr) }), {
+                status: 502,
+                headers: { ...CORS, 'content-type': 'application/json' }
+            });
+        }
     }
 
     const out = new Headers(CORS);

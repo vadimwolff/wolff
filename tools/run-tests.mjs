@@ -42,6 +42,10 @@ code += await run('tools/e2e-v51.mjs', {
     WM_BASE: 'http://localhost:8123',
     WM_BASE_OLD: 'http://localhost:8127'
 });
+code += await run('tools/e2e-v52.mjs', {
+    WM_BASE: 'http://localhost:8123',
+    WM_BASE_OLD: 'http://localhost:8127'
+});
 code += await run('tools/e2e-schema.mjs', {
     WM_BASE_WARMUP: 'http://localhost:8125',
     WM_BASE_ALWAYS: 'http://localhost:8126'

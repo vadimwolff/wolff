@@ -27,7 +27,8 @@
         apiActive: 'WM_API_ACTIVE',
         cacheChats: 'WM_CACHE_CHATS',
         cacheMsgs: 'WM_CACHE_MSGS_',
-        code: 'WM_CODE_'
+        code: 'WM_CODE_',
+        identity: 'WM_IDENTITY'
     };
 
     var THEMES = [
@@ -55,7 +56,10 @@
         activeChat: null,
         msgs: [],
         reads: {},
-        keys: {},               // room_id -> CryptoKey
+        keys: {},               // room_id -> CryptoKey (ключ комнаты)
+        keyTasks: {},           // room_id -> Promise, чтобы не запрашивать ключ дважды
+        identity: null,         // { publicKey (base64), privateKey (CryptoKey) }
+        hasKeyStore: true,      // есть ли таблица room_keys
         selectedRoom: null,
         pickerOpen: null,
         pendingRender: false,
@@ -77,7 +81,8 @@
         serverChats: true,
         hasPreviews: true,
         hasSearch: true,
-        hasReplies: true
+        hasReplies: true,
+        hasPublicKeys: true
     };
 
     /* --------------------------------------------------------------- утилиты */
@@ -180,7 +185,12 @@
 
     /* ------------------------------------------------------------ API-слой */
 
-    var api = { base: null, probing: null, statuses: {} };
+    var api = {
+        base: null,          // адрес, ответивший последним
+        probing: null,
+        statuses: {},        // url -> 'ok' | 'bad' | 'wait'
+        health: {}           // url -> { fails, cooldownUntil, latency }
+    };
 
     function endpointUrl(raw) {
         if (raw.indexOf('same-origin:') === 0) {
@@ -199,6 +209,51 @@
             if (!list.some(function (x) { return x.url === url; })) list.push({ url: url, label: e.label });
         });
         return list;
+    }
+
+    function healthOf(url) {
+        if (!api.health[url]) api.health[url] = { fails: 0, cooldownUntil: 0, latency: null };
+        return api.health[url];
+    }
+
+    function markOk(url, ms) {
+        var h = healthOf(url);
+        h.fails = 0;
+        h.cooldownUntil = 0;
+        h.latency = ms;
+        api.statuses[url] = 'ok';
+    }
+
+    /* Сбойный адрес не выбрасывается навсегда — он отправляется «на отдых»
+       с растущей паузой, поэтому мигающий прокси не блокирует работу. */
+    function markBad(url) {
+        var h = healthOf(url);
+        h.fails++;
+        h.cooldownUntil = Date.now() + Math.min(120000, 4000 * Math.pow(2, h.fails - 1));
+        api.statuses[url] = 'bad';
+    }
+
+    /* Порядок перебора: сначала рабочие, потом отдыхающие; при равенстве —
+       порядок из настроек, а последний успешный адрес идёт первым. */
+    function orderedCandidates() {
+        var now = Date.now();
+        var active = api.base || localStorage.getItem(LS.apiActive);
+        return candidates().map(function (c, i) {
+            var h = healthOf(c.url);
+            return {
+                url: c.url,
+                label: c.label,
+                order: i,
+                cooling: h.cooldownUntil > now,
+                fails: h.fails,
+                preferred: c.url === active ? 0 : 1
+            };
+        }).sort(function (a, b) {
+            if (a.cooling !== b.cooling) return a.cooling ? 1 : -1;
+            if (a.preferred !== b.preferred) return a.preferred - b.preferred;
+            if (a.fails !== b.fails) return a.fails - b.fails;
+            return a.order - b.order;
+        });
     }
 
     function headers(extra) {
@@ -223,13 +278,16 @@
     /* Живой ли адрес: PostgREST обязан ответить JSON-ом. Статическая страница
        (например 404 GitHub Pages) отдаёт HTML и проверку не проходит. */
     function probe(url) {
-        return fetchTimeout(url + '/profiles?select=id&limit=1', { headers: headers(), cache: 'no-store' }, 7000)
+        var started = Date.now();
+        return fetchTimeout(url + '/profiles?select=id&limit=1', { headers: headers(), cache: 'no-store' }, 8000)
             .then(function (r) {
                 var ct = r.headers.get('content-type') || '';
-                if (r.ok) return true;
-                return r.status >= 400 && r.status < 500 && ct.indexOf('json') >= 0;
+                var ok = r.ok || (r.status >= 400 && r.status < 500 && ct.indexOf('json') >= 0);
+                if (ok) markOk(url, Date.now() - started);
+                else markBad(url);
+                return ok;
             })
-            .catch(function () { return false; });
+            .catch(function () { markBad(url); return false; });
     }
 
     function setNetState(ok, message) {
@@ -253,21 +311,16 @@
         if (api.base && !force) return Promise.resolve(api.base);
         if (api.probing) return api.probing;
 
-        var list = candidates();
-        var cached = localStorage.getItem(LS.apiActive);
-        if (cached && !force) {
-            var idx = list.findIndex(function (x) { return x.url === cached; });
-            if (idx > 0) list.unshift(list.splice(idx, 1)[0]);
-        }
+        var list = orderedCandidates();
 
         api.probing = new Promise(function (resolve) {
-            var results = new Array(list.length).fill(null);   // null | true | false
+            var results = new Array(list.length).fill(null);
             var settled = false;
 
             function check() {
                 if (settled) return;
                 for (var i = 0; i < list.length; i++) {
-                    if (results[i] === null) return;            // более приоритетный ещё думает
+                    if (results[i] === null) return;          // более приоритетный ещё думает
                     if (results[i] === true) {
                         settled = true;
                         api.base = list[i].url;
@@ -287,7 +340,6 @@
                 api.statuses[item.url] = 'wait';
                 probe(item.url).then(function (ok) {
                     results[i] = ok;
-                    api.statuses[item.url] = ok ? 'ok' : 'bad';
                     renderConnList();
                     check();
                 });
@@ -322,48 +374,86 @@
             'и повторите через минуту.');
     }
 
+    /* Ошибка самого адреса (сеть, таймаут, сбой шлюза), а не ответ базы: такой
+       запрос имеет смысл повторить на другом адресе. */
+    function isEndpointFailure(err) {
+        if (!err) return false;
+        if (!err.status) return true;                       // сеть или таймаут
+        return err.status >= 500 || err.status === 429 || err.status === 408;
+    }
+
+    /*
+     * Запрос с переключением адресов на лету.
+     *
+     * Раньше адрес выбирался один раз и запоминался; если прокси начинал
+     * «моргать», каждый запрос сначала ждал таймаут и только потом искал
+     * замену. Теперь при сбое адреса запрос немедленно повторяется на
+     * следующем кандидате, а неудачник уходит на паузу с растущим интервалом.
+     */
     function request(path, opts) {
         opts = opts || {};
-        var attempt = 0;
 
-        function run() {
-            return resolveApi(attempt > 0).then(function (base) {
-                if (!base) throw WMError('Нет соединения', 0);
-                return fetchTimeout(base + path, {
-                    method: opts.method || 'GET',
-                    headers: headers(opts.headers),
-                    body: opts.body ? JSON.stringify(opts.body) : undefined,
-                    cache: 'no-store'
-                }, opts.timeout || 20000).then(function (res) {
-                    setNetState(true);
-                    if (res.status === 204 || res.status === 205) return null;
-                    return res.text().then(function (txt) {
-                        var data = null;
-                        if (txt) { try { data = JSON.parse(txt); } catch (e) { data = txt; } }
-                        if (!res.ok) {
-                            var text = (data && data.message) || ('Ошибка ' + res.status);
-                            var code = data && data.code;
-                            if (code === '42501' || /permission denied/i.test(text)) {
-                                text = 'Недостаточно прав в базе — проверьте, что выполнен db/schema.sql';
-                            }
-                            throw WMError(text, res.status, code);
+        var list = orderedCandidates();
+        if (!list.length) return Promise.reject(WMError('Нет адресов сервера', 0));
+
+        var lastError = null;
+        var round = 0;
+
+        function attempt(i) {
+            if (i >= list.length) {
+                if (round === 0 && list.length) {
+                    // второй заход: адрес мог ожить, сеть могла переключиться
+                    round++;
+                    return delay(700).then(function () { return attempt(0); });
+                }
+                setNetState(false, 'Нет связи с сервером');
+                throw lastError || WMError('Нет соединения', 0);
+            }
+
+            var url = list[i].url;
+            var started = Date.now();
+
+            return fetchTimeout(url + path, {
+                method: opts.method || 'GET',
+                headers: headers(opts.headers),
+                body: opts.body ? JSON.stringify(opts.body) : undefined,
+                cache: 'no-store'
+            }, opts.timeout || 15000).then(function (res) {
+                if (res.status >= 500 || res.status === 429) {
+                    throw WMError('Сервер отвечает ошибкой ' + res.status, res.status);
+                }
+                markOk(url, Date.now() - started);
+                if (api.base !== url) {
+                    api.base = url;
+                    localStorage.setItem(LS.apiActive, url);
+                    renderConnList();
+                }
+                setNetState(true);
+
+                if (res.status === 204 || res.status === 205) return null;
+                return res.text().then(function (txt) {
+                    var data = null;
+                    if (txt) { try { data = JSON.parse(txt); } catch (e) { data = txt; } }
+                    if (!res.ok) {
+                        var text = (data && data.message) || ('Ошибка ' + res.status);
+                        var code = data && data.code;
+                        if (code === '42501' || /permission denied/i.test(text)) {
+                            text = 'Недостаточно прав в базе — проверьте, что выполнен db/schema.sql';
                         }
-                        return data;
-                    });
+                        throw WMError(text, res.status, code);
+                    }
+                    return data;
                 });
             }).catch(function (err) {
-                var networkish = !err.status;
-                if (networkish && attempt === 0) {
-                    attempt++;
-                    api.base = null;                    // сеть изменилась — ищем другой адрес
-                    return run();
-                }
-                if (networkish) setNetState(false, 'Нет связи с сервером');
-                throw err;
+                if (!isEndpointFailure(err)) throw err;      // ответ базы — не вина адреса
+                markBad(url);
+                lastError = err;
+                renderConnList();
+                return attempt(i + 1);
             });
         }
 
-        return run();
+        return attempt(0);
     }
 
     function rpc(name, args) {
@@ -372,7 +462,182 @@
 
     function q(v) { return encodeURIComponent(v); }
 
-    /* ------------------------------------------------------ шифрование чата */
+    /* ==================================================================
+       ШИФРОВАНИЕ
+
+       У каждого устройства есть пара ключей. У каждого чата — свой случайный
+       ключ, зашифрованный для каждого участника общим секретом ECDH. Сервер
+       хранит только шифртекст: ни ключ чата, ни закрытый ключ ему не видны.
+       ================================================================== */
+
+    function cryptoReady() {
+        return !!(CR && CR.available() && state.identity && state.identity.privateKey);
+    }
+
+    function saveIdentity(identity) {
+        state.identity = identity;
+        return CR.exportPrivateJwk(identity.privateKey).then(function (jwk) {
+            writeJSON(LS.identity, { publicKey: identity.publicKey, privateJwk: jwk });
+        }).catch(function () { /* не критично: ключ переживёт сессию в памяти */ });
+    }
+
+    function loadIdentity() {
+        var stored = readJSON(LS.identity, null);
+        if (!stored || !stored.privateJwk || !CR || !CR.available()) return Promise.resolve(null);
+        return CR.importPrivateJwk(stored.privateJwk).then(function (priv) {
+            state.identity = { publicKey: stored.publicKey, privateKey: priv };
+            return state.identity;
+        }).catch(function () { return null; });
+    }
+
+    /* Создаём ключи при регистрации, восстанавливаем при входе, а аккаунтам
+       без ключей (созданным до этой версии) выдаём их при первом входе. */
+    function prepareIdentity(password, keys) {
+        if (!CR || !CR.available()) return Promise.resolve(null);
+
+        if (keys && keys.enc_private_key && keys.key_salt) {
+            return CR.passwordKey(password, keys.key_salt)
+                .then(function (pk) { return CR.unwrapPrivate(keys.enc_private_key, pk); })
+                .then(function (priv) {
+                    return saveIdentity({ publicKey: keys.public_key, privateKey: priv });
+                })
+                .then(function () { return state.identity; })
+                .catch(function () { return null; });      // пароль сменили на другом устройстве
+        }
+        return null;
+    }
+
+    function createIdentity(password) {
+        if (!CR || !CR.available()) return Promise.resolve(null);
+        var salt = CR.randomSalt();
+        var identity;
+        return CR.generateIdentity().then(function (id) {
+            identity = id;
+            return CR.passwordKey(password, salt);
+        }).then(function (pk) {
+            return CR.wrapPrivate(identity.privateKey, pk);
+        }).then(function (wrapped) {
+            return saveIdentity(identity).then(function () {
+                return {
+                    public_key: identity.publicKey,
+                    enc_private_key: wrapped,
+                    key_salt: salt
+                };
+            });
+        }).catch(function () { return null; });
+    }
+
+    function profileCols() {
+        return state.hasPublicKeys ? 'id,nickname,name,avatar,public_key' : 'id,nickname,name,avatar';
+    }
+
+    /* Запрос профилей с откатом: в базе прошлой версии колонки ключа нет,
+       и PostgREST отвечает на неё ошибкой 400. */
+    function fetchProfiles(filter) {
+        var base = 'id,nickname,name,avatar';
+        return request('/profiles?' + filter + '&select=' + profileCols())
+            .catch(function (err) {
+                if (err.status !== 400 || !state.hasPublicKeys) throw err;
+                state.hasPublicKeys = false;
+                return request('/profiles?' + filter + '&select=' + base);
+            });
+    }
+
+    function publicKeyOf(userId) {
+        var p = state.profiles[userId];
+        return p && p.public_key ? p.public_key : null;
+    }
+
+    /* Ключ чата: берём готовый, расшифровываем свою копию или создаём новый. */
+    function ensureRoomKey(room) {
+        var chat = findChat(room);
+        if (!chat || chat.kind === 'channel') return Promise.resolve(null);
+        if (!cryptoReady() || !state.hasKeyStore) return Promise.resolve(null);
+
+        return request('/room_keys?room_id=eq.' + q(room) + '&user_id=eq.' + q(state.me.id) +
+            '&select=wrapped_key,wrapped_by&limit=1')
+            .catch(function (err) {
+                if (missingRelation(err)) { state.hasKeyStore = false; return null; }
+                throw err;
+            })
+            .then(function (rows) {
+                if (rows && rows.length) return unwrapRoomKey(rows[0]);
+                return createRoomKey(chat);
+            })
+            .catch(function () { return null; });
+    }
+
+    function unwrapRoomKey(row) {
+        var author = row.wrapped_by || state.me.id;
+        return loadProfiles([author]).then(function () {
+            var pub = publicKeyOf(author);
+            if (!pub) return null;
+            return CR.sharedKey(state.identity.privateKey, pub)
+                .then(function (shared) { return CR.decrypt(shared, row.wrapped_key); })
+                .then(function (raw) { return CR.importRoomKey(raw); });
+        }).catch(function () { return null; });
+    }
+
+    function createRoomKey(chat) {
+        var members = (chat.members || []).slice();
+        if (members.indexOf(state.me.id) < 0) members.push(state.me.id);
+
+        return loadProfiles(members).then(function () {
+            var missing = members.filter(function (id) { return !publicKeyOf(id); });
+            if (missing.length) return null;              // у кого-то старая версия
+
+            var roomKey;
+            return CR.randomRoomKey().then(function (key) {
+                roomKey = key;
+                return CR.exportRoomKey(key);
+            }).then(function (raw) {
+                return Promise.all(members.map(function (id) {
+                    return CR.sharedKey(state.identity.privateKey, publicKeyOf(id))
+                        .then(function (shared) { return CR.encrypt(shared, raw); })
+                        .then(function (wrapped) {
+                            return {
+                                room_id: chat.room_id,
+                                user_id: id,
+                                wrapped_key: wrapped,
+                                wrapped_by: state.me.id
+                            };
+                        });
+                }));
+            }).then(function (rows) {
+                return request('/room_keys', {
+                    method: 'POST',
+                    headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+                    body: rows
+                }).then(function () { return roomKey; });
+            });
+        }).catch(function () { return null; });
+    }
+
+    /* Выдаём ключ комнаты новому участнику группы. */
+    function shareRoomKey(room, userId) {
+        if (!cryptoReady() || !state.hasKeyStore) return Promise.resolve();
+        return roomKey(room).then(function (key) {
+            if (!key) return null;
+            return loadProfiles([userId]).then(function () {
+                var pub = publicKeyOf(userId);
+                if (!pub) return null;
+                return CR.exportRoomKey(key).then(function (raw) {
+                    return CR.sharedKey(state.identity.privateKey, pub)
+                        .then(function (shared) { return CR.encrypt(shared, raw); })
+                        .then(function (wrapped) {
+                            return request('/room_keys', {
+                                method: 'POST',
+                                headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+                                body: {
+                                    room_id: room, user_id: userId,
+                                    wrapped_key: wrapped, wrapped_by: state.me.id
+                                }
+                            });
+                        });
+                });
+            });
+        }).catch(function () { return null; });
+    }
 
     function storedCode(room) {
         try { return localStorage.getItem(LS.code + room) || ''; } catch (e) { return ''; }
@@ -381,15 +646,31 @@
     function roomKey(room) {
         if (!room || !CR || !CR.available()) return Promise.resolve(null);
         if (state.keys[room] !== undefined) return Promise.resolve(state.keys[room]);
+        if (state.keyTasks[room]) return state.keyTasks[room];
+
         var code = storedCode(room);
-        if (!code) { state.keys[room] = null; return Promise.resolve(null); }
-        return CR.deriveKey(code, room).then(function (key) {
-            state.keys[room] = key;
-            return key;
+        var task = code
+            ? CR.deriveKey(code, room)                     // ручной код прошлой версии
+            : ensureRoomKey(room);
+
+        state.keyTasks[room] = task.then(function (key) {
+            state.keys[room] = key || null;
+            delete state.keyTasks[room];
+            updateLockIcon(room);
+            return state.keys[room];
         }).catch(function () {
             state.keys[room] = null;
+            delete state.keyTasks[room];
             return null;
         });
+
+        return state.keyTasks[room];
+    }
+
+    function updateLockIcon(room) {
+        if (state.activeRoom !== room) return;
+        var lock = $('chat-lock');
+        if (lock) lock.hidden = !state.keys[room];
     }
 
     function setRoomCode(room, code) {
@@ -398,6 +679,7 @@
             else localStorage.removeItem(LS.code + room);
         } catch (e) { /* no-op */ }
         delete state.keys[room];
+        delete state.keyTasks[room];
         try { localStorage.removeItem(LS.cacheMsgs + room); } catch (e) { /* no-op */ }
     }
 
@@ -516,9 +798,11 @@
 
         var task = state.registerMode ? doRegister(nick, pass, name || nick) : doLogin(nick, pass);
 
-        task.then(function (user) {
-            state.me = normalizeUser(user);
+        task.then(function (res) {
+            state.me = normalizeUser(res.user || res);
             writeJSON(LS.user, state.me);
+            return setupKeys(nick, pass, res.keys);
+        }).then(function () {
             $('a-pass').value = '';
             $('auth-status').textContent = '';
             toast(state.registerMode ? 'Аккаунт создан' : 'Вход выполнен');
@@ -532,13 +816,48 @@
         });
     }
 
+    /* Ключи после входа: восстанавливаем свои или выдаём их аккаунту,
+       созданному до появления шифрования. */
+    function setupKeys(nick, pass, keys) {
+        if (!CR || !CR.available()) return Promise.resolve();
+        if (state.identity) return Promise.resolve();          // созданы при регистрации
+
+        var restore = prepareIdentity(pass, keys);
+        if (restore) {
+            return restore.then(function (identity) {
+                if (identity) return null;
+                return issueKeys(nick, pass);
+            });
+        }
+        return issueKeys(nick, pass);
+    }
+
+    function issueKeys(nick, pass) {
+        return createIdentity(pass).then(function (bundle) {
+            if (!bundle) return null;
+            return rpc('wm_set_keys', {
+                p_nickname: nick,
+                p_password: pass,
+                p_public_key: bundle.public_key,
+                p_enc_private_key: bundle.enc_private_key,
+                p_key_salt: bundle.key_salt
+            }).catch(function () { return null; });            // старая база — работаем без шифрования
+        }).catch(function () { return null; });
+    }
+
     function doRegister(nick, pass, name) {
-        return rpcRegister(nick, pass, name).catch(function (err) {
+        return createIdentity(pass).then(function (bundle) {
+            return doRegisterWith(nick, pass, name, bundle);
+        });
+    }
+
+    function doRegisterWith(nick, pass, name, bundle) {
+        return rpcRegister(nick, pass, name, bundle).catch(function (err) {
             if (!missingRelation(err)) throw err;
             return legacyRegister(nick, pass, name).catch(function (legacyErr) {
                 if (!accessDenied(legacyErr)) throw legacyErr;
                 return delay(1500)
-                    .then(function () { return rpcRegister(nick, pass, name); })
+                    .then(function () { return rpcRegister(nick, pass, name, bundle); })
                     .catch(function (retryErr) {
                         throw missingRelation(retryErr) ? schemaHint() : retryErr;
                     });
@@ -546,10 +865,21 @@
         });
     }
 
-    function rpcRegister(nick, pass, name) {
-        return rpc('wm_register', { p_nickname: nick, p_password: pass, p_name: name })
+    function rpcRegister(nick, pass, name, bundle) {
+        var args = { p_nickname: nick, p_password: pass, p_name: name };
+        if (bundle) {
+            args.p_public_key = bundle.public_key;
+            args.p_enc_private_key = bundle.enc_private_key;
+            args.p_key_salt = bundle.key_salt;
+        }
+        return rpc('wm_register', args)
+            .catch(function (err) {
+                // база прошлой версии знает функцию только с тремя параметрами
+                if (!bundle || !missingRelation(err)) throw err;
+                return rpc('wm_register', { p_nickname: nick, p_password: pass, p_name: name });
+            })
             .then(function (res) {
-                if (res && res.ok) return res.user;
+                if (res && res.ok) return { user: res.user, keys: res.keys };
                 var map = {
                     nickname_taken: 'Такой никнейм уже занят',
                     bad_nickname: 'Ник: 3–32 символа, латиница, цифры, _ и .',
@@ -569,8 +899,8 @@
                 headers: { Prefer: 'return=representation' },
                 body: { id: id, nickname: nick, password: pass, name: name, avatar: '' }
             }).then(function (res) {
-                if (res && res.length) return res[0];
-                return { id: id, nickname: nick, name: name, avatar: '' };
+                if (res && res.length) return { user: res[0] };
+                return { user: { id: id, nickname: nick, name: name, avatar: '' } };
             });
         });
     }
@@ -591,7 +921,7 @@
 
     function rpcLogin(nick, pass) {
         return rpc('wm_login', { p_nickname: nick, p_password: pass }).then(function (res) {
-            if (res && res.ok) return res.user;
+            if (res && res.ok) return { user: res.user, keys: res.keys };
             throw WMError('Неверный никнейм или пароль');
         });
     }
@@ -599,7 +929,7 @@
     function legacyLogin(nick, pass) {
         return request('/profiles?nickname=eq.' + q(nick) + '&password=eq.' + q(pass) + '&limit=1')
             .then(function (rows) {
-                if (rows && rows.length) return rows[0];
+                if (rows && rows.length) return { user: rows[0] };
                 throw WMError('Неверный никнейм или пароль');
             });
     }
@@ -608,6 +938,8 @@
         confirmBox('Выйти из аккаунта?', 'Локальные данные на этом устройстве будут удалены, ' +
             'включая коды шифрования чатов.', 'Выйти', function () {
             stopTimers();
+            state.identity = null;
+            state.keys = {};
             try {
                 Object.keys(localStorage).forEach(function (k) {
                     if (k.indexOf('WM_') === 0 && k !== LS.theme && k !== LS.api) localStorage.removeItem(k);
@@ -873,9 +1205,10 @@
     }
 
     function loadProfiles(ids) {
-        var need = ids.filter(function (id) { return id && !state.profiles[id]; });
+        var need = (ids || []).filter(function (id) { return id && !state.profiles[id]; });
         if (!need.length) return Promise.resolve();
-        return request('/profiles?id=in.(' + need.map(q).join(',') + ')&select=id,nickname,name,avatar')
+
+        return fetchProfiles('id=in.(' + need.map(q).join(',') + ')')
             .then(function (rows) {
                 (rows || []).forEach(function (p) { state.profiles[p.id] = p; });
             })
@@ -959,9 +1292,28 @@
                 c.unread = counts[c.room_id] || 0;
                 if (!state.hasPreviews && last[c.room_id]) c.ts = last[c.room_id].created_at;
             });
+            return decodePreviews();
         }).catch(function (err) {
             if (err.status) throw err;
         });
+    }
+
+    /* Подписи в списке чатов тоже зашифрованы — расшифровываем ключом чата. */
+    function decodePreviews() {
+        if (!CR || !CR.available()) return Promise.resolve();
+        var work = state.chats.filter(function (c) { return CR.isEncrypted(c.preview); });
+        if (!work.length) return Promise.resolve();
+
+        return Promise.all(work.map(function (c) {
+            return roomKey(c.room_id).then(function (key) {
+                if (!key) { c.preview = '🔒 Зашифрованное сообщение'; return; }
+                return CR.decrypt(key, c.preview).then(function (plain) {
+                    c.preview = plain;
+                }).catch(function () {
+                    c.preview = '🔒 Зашифрованное сообщение';
+                });
+            }).catch(function () { c.preview = '🔒 Зашифрованное сообщение'; });
+        }));
     }
 
     function chatListModel() {
@@ -978,7 +1330,7 @@
                 unread: c.unread || 0,
                 pinned: !!p.pinned,
                 muted: !!p.muted,
-                encrypted: !!storedCode(c.room_id)
+                encrypted: !!state.keys[c.room_id]
             };
         }).filter(function (c) {
             return !term || c.title.toLowerCase().indexOf(term) >= 0;
@@ -1160,7 +1512,7 @@
         if (!nick) return Promise.resolve();
         if (nick === state.me.nickname) { toast('Это вы 🙂'); return Promise.resolve(); }
 
-        return request('/profiles?nickname=eq.' + q(nick) + '&select=id,nickname,name,avatar&limit=1')
+        return fetchProfiles('nickname=eq.' + q(nick) + '&limit=1')
             .then(function (rows) {
                 if (!rows || !rows.length) { toast('Пользователь не найден'); return; }
                 var other = rows[0];
@@ -1335,7 +1687,7 @@
         promptBox('Добавить участника', 'Никнейм пользователя', '@', function (val) {
             var nick = val.trim().toLowerCase().replace(/^@+/, '');
             if (!nick) return;
-            request('/profiles?nickname=eq.' + q(nick) + '&select=id,nickname,name,avatar&limit=1')
+            fetchProfiles('nickname=eq.' + q(nick) + '&limit=1')
                 .then(function (rows) {
                     if (!rows || !rows.length) { toast('Пользователь не найден'); return; }
                     var other = rows[0];
@@ -1351,8 +1703,9 @@
                         .then(function () {
                             chat.members = (chat.members || []).concat([other.id]);
                             updateChatHeader();
-                            toast('Участник добавлен');
-                        });
+                            return shareRoomKey(chat.room_id, other.id);
+                        })
+                        .then(function () { toast('Участник добавлен'); });
                 })
                 .catch(function (e) { toast(e.message || 'Не удалось добавить участника'); });
         });
@@ -1404,7 +1757,7 @@
         if (!chat) return;
 
         $('chat-title').childNodes[0].nodeValue = chatDisplayName(chat) + ' ';
-        $('chat-lock').hidden = !storedCode(chat.room_id);
+        $('chat-lock').hidden = !state.keys[chat.room_id];
 
         var sub = '';
         if (chat.kind === 'channel') {
@@ -1457,7 +1810,7 @@
         updateChatHeader();
         showPage('chat', true);
         $('m-input').value = '';
-        $('m-input').placeholder = storedCode(room) ? 'Зашифрованное сообщение…' : 'Сообщение...';
+        $('m-input').placeholder = 'Сообщение...';
         autoGrow($('m-input'));
 
         stopChatTimer();
@@ -1875,13 +2228,16 @@
         state.msgs.push(temp);
         renderMessages(true);
 
+        var previewText = isImage(text) ? '📷 Фото' : String(text).slice(0, 70);
+
         roomKey(room).then(function (key) {
-            if (!key) return { text: text, quote: reply ? reply.preview : null };
-            return CR.encrypt(key, text).then(function (cipher) {
-                if (!reply) return { text: cipher, quote: null };
-                return CR.encrypt(key, reply.preview).then(function (q) {
-                    return { text: cipher, quote: q };
-                });
+            if (!key) return { text: text, quote: reply ? reply.preview : null, preview: previewText };
+            return Promise.all([
+                CR.encrypt(key, text),
+                reply ? CR.encrypt(key, reply.preview) : Promise.resolve(null),
+                CR.encrypt(key, previewText)
+            ]).then(function (parts) {
+                return { text: parts[0], quote: parts[1], preview: parts[2] };
             });
         }).then(function (payload) {
             var body = {
@@ -1889,6 +2245,7 @@
                 user_id: state.me.id,
                 user_name: state.me.name,
                 text: payload.text,
+                preview: payload.preview,
                 reactions: {},
                 created_at: stamp
             };
@@ -1902,9 +2259,10 @@
                 headers: { Prefer: 'return=representation' },
                 body: body
             }).catch(function (err) {
-                // старая таблица без колонок ответа — отправляем без цитаты
-                if (err.status !== 400 || !reply) throw err;
+                // старая таблица без новых колонок — отправляем базовый набор полей
+                if (err.status !== 400) throw err;
                 delete body.reply_to; delete body.reply_name; delete body.reply_preview;
+                delete body.preview;
                 return request('/messages', {
                     method: 'POST',
                     headers: { Prefer: 'return=representation' },
@@ -2227,31 +2585,65 @@
 
     function openCryptoModal() {
         closeChatMenu();
+        var room = state.activeRoom;
+        var chat = state.activeChat;
+        if (!room || !chat) return;
+
+        $('crypto-modal').classList.add('show');
+        $('crypto-code-box').hidden = true;
+        $('crypto-off').hidden = !storedCode(room);
+
         if (!CR || !CR.available()) {
-            toast('Браузер не поддерживает шифрование (нужен https)');
+            setCryptoState(false, 'Недоступно', 'Браузер не поддерживает шифрование. ' +
+                'Оно требует защищённого соединения (https).');
             return;
         }
-        $('crypto-code').value = storedCode(state.activeRoom) || '';
-        $('crypto-modal').classList.add('show');
+        if (chat.kind === 'channel') {
+            setCryptoState(false, 'Канал открыт всем',
+                'Записи канала может прочитать любой подписчик, поэтому они не шифруются.');
+            return;
+        }
+
+        $('crypto-state').textContent = 'Проверяем…';
+        $('crypto-state').className = 'crypto-state';
+
+        roomKey(room).then(function (key) {
+            if (!key) {
+                setCryptoState(false, 'Пока не включено',
+                    'Ключи появятся, когда все участники войдут в новую версию приложения. ' +
+                    'До этого сообщения передаются без шифрования.');
+                return;
+            }
+            setCryptoState(true, 'Включено',
+                'Сообщения, цитаты и фотографии шифруются на устройстве. ' +
+                'На сервере хранится только нечитаемый набор символов.');
+
+            var other = (chat.members || []).filter(function (m) { return m !== state.me.id; })[0];
+            var myPub = state.identity && state.identity.publicKey;
+            var theirPub = other && publicKeyOf(other);
+            if (chat.kind === 'dm' && myPub && theirPub) {
+                CR.fingerprint(myPub, theirPub).then(function (code) {
+                    $('crypto-fingerprint').textContent = code;
+                    $('crypto-code-box').hidden = false;
+                });
+            }
+        });
     }
 
-    function saveCryptoCode() {
-        var room = state.activeRoom;
-        var code = $('crypto-code').value.trim();
-        if (!room) return;
-        if (code.length < 4) { toast('Код от 4 символов'); return; }
-        setRoomCode(room, code);
-        $('crypto-modal').classList.remove('show');
-        toast('Шифрование включено');
-        reloadRoomAfterKeyChange(room);
+    function setCryptoState(ok, title, note) {
+        var el = $('crypto-state');
+        el.textContent = (ok ? '🔒 ' : '🔓 ') + title;
+        el.className = 'crypto-state ' + (ok ? 'on' : 'off');
+        $('crypto-note').textContent = note || '';
     }
 
+    /* Ручной код прошлой версии: только снятие, новые чаты шифруются сами. */
     function disableCrypto() {
         var room = state.activeRoom;
         if (!room) return;
         setRoomCode(room, '');
         $('crypto-modal').classList.remove('show');
-        toast('Шифрование выключено');
+        toast('Старый код чата убран');
         reloadRoomAfterKeyChange(room);
     }
 
@@ -2259,7 +2651,6 @@
         state.msgs = [];
         state.firstChatPaint = true;
         $('msg-list').innerHTML = skeletonHtml();
-        $('m-input').placeholder = storedCode(room) ? 'Зашифрованное сообщение…' : 'Сообщение...';
         updateChatHeader();
         state.listSig = '';
         renderChatList();
@@ -2278,7 +2669,8 @@
             $('pf-av').src = (p && p.avatar) || avatarFor(name, userId);
             $('pf-name').textContent = name;
             $('pf-nick').textContent = p && p.nickname ? '@' + p.nickname : '';
-            $('pf-extra').textContent = isMe ? 'Это ваш профиль' : '';
+            $('pf-extra').textContent = isMe ? 'Это ваш профиль'
+                : (p && p.public_key ? 'Переписка с этим человеком шифруется' : '');
             $('pf-write').hidden = isMe || !p;
             $('pf-write').onclick = function () {
                 modal.classList.remove('show');
@@ -2369,11 +2761,17 @@
     function renderConnList() {
         var box = $('conn-list');
         if (!box) return;
+        var now = Date.now();
         box.innerHTML = candidates().map(function (c) {
             var st = api.statuses[c.url] || '';
+            var h = api.health[c.url] || {};
             var active = api.base === c.url;
+            var note = '';
+            if (active) note = ' · активен';
+            else if (h.cooldownUntil > now) note = ' · пауза ' + Math.ceil((h.cooldownUntil - now) / 1000) + ' с';
+            if (h.latency != null && st === 'ok') note += ' · ' + h.latency + ' мс';
             return '<div class="conn-row"><span class="dot ' + esc(st) + '"></span>' +
-                '<div style="flex:1;min-width:0"><div>' + esc(c.label) + (active ? ' · активен' : '') + '</div>' +
+                '<div style="flex:1;min-width:0"><div>' + esc(c.label) + esc(note) + '</div>' +
                 '<div class="url">' + esc(c.url) + '</div></div></div>';
         }).join('');
     }
@@ -2395,6 +2793,7 @@
         localStorage.removeItem(LS.apiActive);
         api.base = null;
         api.statuses = {};
+        api.health = {};
         toast('Проверяем адреса…');
         resolveApi(true).then(function (base) {
             renderConnList();
@@ -2413,12 +2812,14 @@
         $('conn-custom').value = '';
         api.base = null;
         api.statuses = {};
+        api.health = {};
         resolveApi(true).then(renderConnList);
     }
 
     function reconnect() {
         api.base = null;
         api.statuses = {};
+        api.health = {};
         toast('Переподключение…');
         return resolveApi(true).then(function (base) {
             if (base && state.me) { syncChats(); if (state.activeRoom) pollChat(true); }
@@ -2643,7 +3044,6 @@
         $('ch-cancel').addEventListener('click', function () { $('channel-modal').classList.remove('show'); });
         $('channel-modal').addEventListener('click', function (e) { if (e.target === this) this.classList.remove('show'); });
 
-        $('crypto-save').addEventListener('click', saveCryptoCode);
         $('crypto-off').addEventListener('click', disableCrypto);
         $('crypto-close').addEventListener('click', function () { $('crypto-modal').classList.remove('show'); });
         $('crypto-modal').addEventListener('click', function (e) { if (e.target === this) this.classList.remove('show'); });
@@ -2677,6 +3077,7 @@
         setAuthMode(false);
 
         state.me = normalizeUser(readJSON(LS.user, null));
+        loadIdentity();
         if (state.me && state.me.id) startApp();
         else showPage('auth');
 
