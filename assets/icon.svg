@@ -1,12 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Иконка приложения. Волк занимает всю площадь картинки: раньше он был
+       мелким на большом тёмном поле и на домашнем экране почти не читался. -->
   <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#007aff"/>
-      <stop offset="1" stop-color="#00c6ff"/>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#20222b"/>
+      <stop offset="1" stop-color="#0b0b0d"/>
     </linearGradient>
   </defs>
-  <rect width="512" height="512" rx="112" fill="#0b0b0d"/>
-  <circle cx="256" cy="256" r="176" fill="url(#g)" opacity="0.16"/>
-  <text x="256" y="286" font-size="240" text-anchor="middle" dominant-baseline="middle"
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <text x="256" y="262" font-size="470" text-anchor="middle" dominant-baseline="central"
         font-family="Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji, sans-serif">🐺</text>
 </svg>

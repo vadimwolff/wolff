@@ -48,8 +48,12 @@ const db = {
     room_reads: [],
     room_keys: [],
     attachments: [],
-    push_subscriptions: []
+    push_subscriptions: [],
+    calls: []
 };
+
+/* WM_AI=busy — помощник «перегружен», WM_AI=off — ключа нет. */
+const AI_MODE = process.env.WM_AI || '';
 
 /* Что ушло на сервер уведомлений: тесты смотрят сюда. */
 const pushLog = [];
@@ -60,6 +64,7 @@ const MOCK_VAPID = 'BDOWGXA08bMq-yXbKASz2aESoUQlpMXv9jR6ZjjXO4jaZTFA5j91SdguNu0o
 
 let messageSeq = 1;
 let attachmentSeq = 1;
+let callSeq = 1;
 
 const hash = (s) => 'bcrypt$' + crypto.createHash('sha256').update(String(s)).digest('hex');
 
@@ -77,6 +82,10 @@ function splitTop(text) {
     }
     if (buf) out.push(buf);
     return out;
+}
+
+function numeric(a, b) {
+    return a !== null && a !== '' && b !== '' && !isNaN(Number(a)) && !isNaN(Number(b));
 }
 
 function matchFilter(row, column, expr) {
@@ -104,10 +113,11 @@ function matchFilter(row, column, expr) {
         }
         case 'eq': return String(value) === raw;
         case 'neq': return String(value) !== raw;
-        case 'gt': return String(value) > raw;
-        case 'gte': return String(value) >= raw;
-        case 'lt': return String(value) < raw;
-        case 'lte': return String(value) <= raw;
+        // Числа сравниваем числами: иначе «10 > 9» оказалось бы ложью.
+        case 'gt': return numeric(value, raw) ? Number(value) > Number(raw) : String(value) > raw;
+        case 'gte': return numeric(value, raw) ? Number(value) >= Number(raw) : String(value) >= raw;
+        case 'lt': return numeric(value, raw) ? Number(value) < Number(raw) : String(value) < raw;
+        case 'lte': return numeric(value, raw) ? Number(value) <= Number(raw) : String(value) <= raw;
         case 'in': {
             const items = raw.replace(/^\(|\)$/g, '').split(',')
                 .map((s) => s.trim().replace(/^"|"$/g, ''));
@@ -134,7 +144,9 @@ function applyQuery(rows, params) {
     const order = params.get('order');
     if (order) {
         const [col, dir = 'asc'] = order.split('.');
-        out.sort((a, b) => String(a[col] ?? '').localeCompare(String(b[col] ?? '')));
+        out.sort((a, b) => (numeric(a[col], b[col])
+            ? Number(a[col]) - Number(b[col])
+            : String(a[col] ?? '').localeCompare(String(b[col] ?? ''))));
         if (dir.startsWith('desc')) out.reverse();
     }
 
@@ -461,6 +473,10 @@ function handleApi(req, res, rest, body) {
                 rec.id = attachmentSeq++;
                 rec.created_at = rec.created_at || new Date().toISOString();
             }
+            if (name === 'calls') {
+                rec.id = callSeq++;
+                rec.created_at = rec.created_at || new Date().toISOString();
+            }
             if (name === 'messages') {
                 rec.id = messageSeq++;
                 rec.created_at = rec.created_at || new Date().toISOString();
@@ -500,6 +516,27 @@ function handleApi(req, res, rest, body) {
 
 const server = http.createServer((req, res) => {
     if (req.method === 'OPTIONS') return json(res, 204, null);
+
+    // Помощник: отвечает заготовкой, а в режиме WM_AI=busy — отказом,
+    // как при исчерпанном бесплатном лимите.
+    if (req.url.split('?')[0] === '/api/ai') {
+        if (req.method === 'GET') return json(res, 200, { ok: AI_MODE !== 'off', models: 4 });
+        let body = '';
+        req.on('data', (c) => { body += c; });
+        req.on('end', () => {
+            let parsed = null;
+            try { parsed = JSON.parse(body || '{}'); } catch { parsed = null; }
+            const last = parsed && parsed.messages && parsed.messages[parsed.messages.length - 1];
+            if (AI_MODE === 'busy') return json(res, 200, { ok: false, error: 'busy' });
+            if (AI_MODE === 'off') return json(res, 200, { ok: false, error: 'not_configured' });
+            return json(res, 200, {
+                ok: true,
+                model: 'mock-flash',
+                text: 'Отвечаю на: ' + String((last && last.text) || '').slice(0, 60)
+            });
+        });
+        return undefined;
+    }
 
     // Сервер уведомлений: отдаёт ключ и записывает, о чём его попросили.
     if (req.url.split('?')[0] === '/api/push') {

@@ -63,11 +63,11 @@ await step('личный чат и первое сообщение', async () =>
 });
 
 await step('от человека остаётся только одна реакция', async () => {
-    await oleg.page.click('.bubble.in');
+    await oleg.page.click('.bubble.in', { button: 'right' });
     await oleg.page.click('.msg-menu .emoji-btn[data-pick="👍"]');
     await oleg.page.waitForSelector('.bubble.in .reaction-badge.mine', { timeout: 15000 });
 
-    await oleg.page.click('.bubble.in');
+    await oleg.page.click('.bubble.in', { button: 'right' });
     await oleg.page.click('.msg-menu .emoji-btn[data-pick="❤️"]');
     await oleg.page.waitForFunction(() => {
         const badges = document.querySelectorAll('.bubble.in .reaction-badge');
@@ -79,8 +79,11 @@ await step('от человека остаётся только одна реа�
 });
 
 await step('видно, кто оставил реакцию', async () => {
+    // Список отреагировавших открывается из меню сообщения, а не нажатием
+    // на плашку: плашка теперь ставит такую же реакцию.
     await anna.page.waitForSelector('.bubble.out .reaction-badge', { timeout: 25000 });
-    await anna.page.click('.bubble.out .reaction-badge');
+    await anna.page.click('.bubble.out .text', { button: 'right' });
+    await anna.page.click('.msg-menu .menu-item[data-act="who"]');
     await anna.page.waitForSelector('#reactions-modal.show .reaction-user', { timeout: 15000 });
     const row = await anna.page.textContent('#reactions-modal .reaction-user');
     assert(row.includes('Олег'), 'в списке реакций нет автора: ' + row);
@@ -104,25 +107,26 @@ await step('профиль собеседника открывается из ш
 });
 
 await step('меню закрывается и не накапливается', async () => {
-    await oleg.page.click('.bubble.in .text');
+    await oleg.page.click('.bubble.in .text', { button: 'right' });
     await oleg.page.waitForSelector('.msg-menu', { timeout: 10000 });
 
-    await oleg.page.click('#msg-list', { position: { x: 200, y: 20 } });   // клик мимо
+    await oleg.page.click('#m-input');                       // нажатие мимо меню
     await oleg.page.waitForFunction(
         () => document.querySelectorAll('.msg-menu').length === 0, null, { timeout: 10000 });
 
-    await oleg.page.click('.bubble.in .text');
-    await oleg.page.click('.bubble.in .text');
+    await oleg.page.click('.bubble.in .text', { button: 'right' });
+    await oleg.page.click('.bubble.in .text', { button: 'right' });
     await oleg.page.waitForTimeout(400);
     const menus = await oleg.page.locator('.msg-menu').count();
     assert(menus <= 1, 'одновременно открыто меню: ' + menus);
 
-    await oleg.page.click('#msg-list', { position: { x: 200, y: 20 } });
-    await oleg.page.waitForTimeout(200);
+    await oleg.page.keyboard.press('Escape');
+    await oleg.page.waitForFunction(
+        () => document.querySelectorAll('.msg-menu').length === 0, null, { timeout: 10000 });
 });
 
 await step('ответ на сообщение с цитатой', async () => {
-    await oleg.page.click('.bubble.in');
+    await oleg.page.click('.bubble.in', { button: 'right' });
     await oleg.page.click('.msg-menu .menu-item[data-act="reply"]');
     await oleg.page.waitForSelector('#reply-bar:not([hidden])', { timeout: 10000 });
     const preview = await oleg.page.textContent('#reply-preview');
@@ -242,7 +246,7 @@ await step('в канале список авторов реакций не от
     await anna.page.click('#btn-send');
     await anna.page.waitForSelector('.bubble.out:not(.pending)', { timeout: 20000 });
 
-    await anna.page.click('.bubble.out .text');       // мимо ссылки на обсуждение
+    await anna.page.click('.bubble.out .text', { button: 'right' });       // мимо ссылки на обсуждение
     await anna.page.waitForSelector('.msg-menu', { timeout: 10000 });
     const hasWho = await anna.page.locator('.msg-menu .menu-item[data-act="who"]').count();
     assert(hasWho === 0, 'в канале предложено смотреть авторов реакций');

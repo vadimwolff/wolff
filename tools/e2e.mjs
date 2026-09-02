@@ -151,7 +151,7 @@ await step('галочки становятся «прочитано»', async (
 });
 
 await step('реакция ставится и видна собеседнику', async () => {
-    await alice.page.click('.bubble.in');
+    await alice.page.click('.bubble.in', { button: 'right' });
     await alice.page.waitForSelector('.msg-menu');
     await alice.page.click('.msg-menu .emoji-btn[data-pick="🔥"]');
     await alice.page.waitForSelector('.bubble.in .reaction-badge.mine', { timeout: 10000 });
@@ -163,7 +163,7 @@ await step('реакция ставится и видна собеседнику
 });
 
 await step('повторный выбор той же реакции снимает её', async () => {
-    await alice.page.click('.bubble.in');
+    await alice.page.click('.bubble.in', { button: 'right' });
     await alice.page.waitForSelector('.msg-menu .emoji-btn.chosen');
     await alice.page.click('.msg-menu .emoji-btn.chosen');
     await alice.page.waitForFunction(
@@ -183,7 +183,7 @@ await step('длинное сообщение и перенос строк не 
 
 await step('удаление своего сообщения', async () => {
     const before = await alice.page.locator('.bubble.out').count();
-    await alice.page.locator('.bubble.out').last().click();
+    await alice.page.locator('.bubble.out').last().click({ button: 'right' });
     await alice.page.waitForSelector('.msg-menu .menu-item[data-act="delete"]');
     await alice.page.click('.msg-menu .menu-item[data-act="delete"]');
     await alice.page.waitForFunction(
@@ -244,17 +244,20 @@ await step('поиск по списку чатов', async () => {
         () => document.querySelectorAll('#chat-list .f-item').length === 1, null, { timeout: 10000 });
     await bob.page.fill('#chat-search', '');
     await bob.page.waitForFunction(
-        () => document.querySelectorAll('#chat-list .f-item').length === 3, null, { timeout: 10000 });
+        () => document.querySelectorAll('#chat-list .f-item').length === 4, null, { timeout: 10000 });
 });
 
 await step('закрепление чата поднимает его наверх', async () => {
     await bob.page.locator('#chat-list .f-item:has-text("Алиса")').dispatchEvent('mousedown');
     await bob.page.waitForSelector('#context-bar.show', { timeout: 5000 });
     await bob.page.click('#ctx-pin');
-    // «Избранное» остаётся первым, закреплённый чат встаёт сразу за ним.
+    // Личные разделы («Избранное», WolffAI) всегда сверху, а среди обычных
+    // чатов закреплённый поднимается выше остальных.
     await bob.page.waitForFunction(() => {
-        const rows = [...document.querySelectorAll('#chat-list .f-item')];
-        return rows[1] && rows[1].textContent.includes('📌') && rows[1].textContent.includes('Алиса');
+        const rows = [...document.querySelectorAll('#chat-list .f-item')].map((e) => e.textContent);
+        const pinned = rows.findIndex((t) => t.includes('Алиса'));
+        const other = rows.findIndex((t) => t.includes('Стая'));
+        return pinned >= 0 && other >= 0 && pinned < other && rows[pinned].includes('📌');
     }, null, { timeout: 10000 });
 });
 

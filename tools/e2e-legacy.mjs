@@ -84,7 +84,7 @@ await step('переписка работает (чаты хранятся ло�
 });
 
 await step('реакции работают без таблицы reactions-владельцев', async () => {
-    await b.page.click('.bubble.in');
+    await b.page.click('.bubble.in', { button: 'right' });
     await b.page.waitForSelector('.msg-menu');
     await b.page.click('.msg-menu .emoji-btn[data-pick="👍"]');
     await b.page.waitForSelector('.bubble.in .reaction-badge.mine', { timeout: 10000 });

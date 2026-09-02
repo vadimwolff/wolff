@@ -17,7 +17,11 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /* transparent: true — фон не заливается, нужен для значка строки состояния. */
 const JOBS = [
-    { svg: 'assets/badge.svg', out: 'assets/badge-96.png', size: 96, transparent: true }
+    { svg: 'assets/badge.svg', out: 'assets/badge-96.png', size: 96, transparent: true },
+    { svg: 'assets/icon.svg', out: 'assets/icon-192.png', size: 192 },
+    { svg: 'assets/icon.svg', out: 'assets/icon-512.png', size: 512 },
+    { svg: 'assets/icon.svg', out: 'assets/apple-touch-icon.png', size: 180 },
+    { svg: 'assets/icon-maskable.svg', out: 'assets/icon-maskable.png', size: 512 }
 ];
 
 const browser = await chromium.launch({

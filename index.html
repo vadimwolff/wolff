@@ -105,6 +105,7 @@
             <b id="chat-title">Чат <span id="chat-lock" class="lock" hidden>🔒</span></b>
             <small id="chat-subtitle"></small>
         </div>
+        <span class="hdr-btn" id="btn-call" title="Позвонить" hidden>📞</span>
         <span class="hdr-btn" id="btn-chat-menu" title="Меню чата">⋮</span>
     </header>
 
@@ -137,6 +138,16 @@
         <input type="file" id="m-file" accept="image/*" hidden>
         <textarea id="m-input" rows="1" placeholder="Сообщение..."></textarea>
         <button type="button" id="btn-send" class="send" title="Отправить">➤</button>
+        <button type="button" id="btn-mic" class="send mic" title="Голосовое сообщение" hidden>🎤</button>
+
+        <!-- Полоса записи закрывает строку ввода, пока идёт запись голоса. -->
+        <div class="rec-bar" id="rec-bar" hidden>
+            <span class="rec-dot"></span>
+            <span class="rec-time" id="rec-time">0:00</span>
+            <span class="rec-hint" id="rec-hint">Отпустите — отправится</span>
+            <button type="button" class="rec-btn" id="rec-cancel">Отмена</button>
+            <button type="button" class="rec-btn accent" id="rec-stop" hidden>Отправить</button>
+        </div>
     </div>
 
     <div class="channel-bar" id="channel-bar" hidden>
@@ -318,6 +329,21 @@
             <button type="button" class="btn-primary" id="install-go" hidden>Установить</button>
         </div>
     </div>
+</div>
+
+<!-- ================= ЗВОНОК ================= -->
+<div id="call-screen" class="call-screen" hidden>
+    <div class="call-body">
+        <img id="call-av" class="call-av" alt="">
+        <b id="call-name">Собеседник</b>
+        <p id="call-status" class="call-status">Вызов…</p>
+    </div>
+    <div class="call-actions">
+        <button type="button" class="call-btn" id="call-mute" hidden>🎙</button>
+        <button type="button" class="call-btn accept" id="call-accept" hidden>📞</button>
+        <button type="button" class="call-btn decline" id="call-hangup">✕</button>
+    </div>
+    <audio id="call-audio" autoplay></audio>
 </div>
 
 <div id="lightbox" class="lightbox"><img id="lightbox-img" alt=""></div>

@@ -30,7 +30,8 @@ const servers = [
     start(8124, { WM_LEGACY: '1' }),        // старая схема без функций входа
     start(8125, { WM_DENY: 'warmup' }),     // кеш API прогревается
     start(8126, { WM_DENY: 'always' }),     // кеш API не обновился
-    start(8127, { WM_OLDCHATS: '1' })       // база без колонок каналов и ответов
+    start(8127, { WM_OLDCHATS: '1' }),      // база без колонок каналов и ответов
+    start(8128, { WM_AI: 'busy' })          // помощник исчерпал бесплатный лимит
 ];
 await new Promise((r) => setTimeout(r, 1500));
 
@@ -50,6 +51,10 @@ code += await run('tools/e2e-v53.mjs', { WM_BASE: 'http://localhost:8123' });
 code += await run('tools/e2e-v54.mjs', { WM_BASE: 'http://localhost:8123' });
 code += await run('tools/e2e-v55.mjs', { WM_BASE: 'http://localhost:8123' });
 code += await run('tools/e2e-v56.mjs', { WM_BASE: 'http://localhost:8123' });
+code += await run('tools/e2e-v57.mjs', {
+    WM_BASE: 'http://localhost:8123',
+    WM_BASE_BUSY: 'http://localhost:8128'
+});
 code += await run('tools/e2e-push.mjs');
 code += await run('tools/e2e-schema.mjs', {
     WM_BASE_WARMUP: 'http://localhost:8125',

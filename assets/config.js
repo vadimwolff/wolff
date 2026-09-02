@@ -35,6 +35,19 @@ window.WM_CONFIG = {
        домене самого сайта по адресу /api/push. */
     pushUrl: "",
 
+    /* Сервер помощника WolffAI. Пусто — приложение ищет его само рядом с
+       адресом базы и на домене сайта, по адресу /api/ai. */
+    aiUrl: "",
+
+    /* Серверы для звонков. STUN помогает двум устройствам найти друг друга
+       через интернет. Если звонки не соединяются из некоторых сетей, сюда
+       добавляют свой TURN-сервер: { urls, username, credential }. */
+    iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun1.l.google.com:19302" },
+        { urls: "stun:stun.cloudflare.com:3478" }
+    ],
+
     /* Интервалы опроса сервера, мс */
     pollChatMs: 2000,
     pollListMs: 5000,
