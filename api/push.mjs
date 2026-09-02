@@ -110,23 +110,27 @@ export default async function handler(req, res) {
         return;
     }
 
-    const msg = Number(payload && payload.msg);
-    if (!Number.isFinite(msg) || msg <= 0) {
+    // Уведомление о сообщении или о входящем звонке.
+    const isCall = !!(payload && payload.call);
+    const id = Number(isCall ? payload.call : (payload && payload.msg));
+    if (!Number.isFinite(id) || id <= 0) {
         reply(res, 400, { ok: false, error: 'bad_request' });
         return;
     }
 
     const now = Date.now();
+    const mark = (isCall ? 'call:' : 'msg:') + id;
     for (const [key, time] of recent) if (now - time > 300000) recent.delete(key);
-    if (recent.has(msg)) {
+    if (recent.has(mark)) {
         reply(res, 200, { ok: true, sent: 0, note: 'already_sent' });
         return;
     }
-    recent.set(msg, now);
+    recent.set(mark, now);
 
     let info;
     try {
-        info = await rpc('wm_push_targets', { p_msg: msg });
+        info = isCall ? await rpc('wm_push_call', { p_call: id })
+            : await rpc('wm_push_targets', { p_msg: id });
     } catch (e) {
         reply(res, 502, { ok: false, error: 'database_unavailable' });
         return;
@@ -139,9 +143,10 @@ export default async function handler(req, res) {
 
     const body = JSON.stringify({
         title: info.title || 'WolffMsg',
-        body: 'Новое сообщение',
+        body: isCall ? 'Входящий звонок' : 'Новое сообщение',
         room: info.room,
-        msg: info.msg
+        msg: info.msg,
+        call: isCall ? info.call : undefined
     });
 
     const targets = Array.isArray(info.targets) ? info.targets : [];

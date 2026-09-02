@@ -517,6 +517,32 @@ function handleApi(req, res, rest, body) {
 const server = http.createServer((req, res) => {
     if (req.method === 'OPTIONS') return json(res, 204, null);
 
+    // Гифки: список и сам файл, как это делает серверный прокси.
+    if (req.url.split('?')[0] === '/api/gif') {
+        const params = new URLSearchParams(req.url.split('?')[1] || '');
+        if (params.get('file')) {
+            const gif = Buffer.from(
+                'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+            res.writeHead(200, {
+                'Content-Type': 'image/gif',
+                'Content-Length': String(gif.length),
+                'Access-Control-Allow-Origin': '*'
+            });
+            return res.end(gif);
+        }
+        const q = params.get('q') || '';
+        return json(res, 200, {
+            ok: true,
+            results: [1, 2, 3].map((n) => ({
+                id: 'g' + n,
+                title: (q || 'популярное') + ' ' + n,
+                preview: 'https://media.tenor.com/preview' + n + '.gif',
+                url: 'https://media.tenor.com/clip' + n + '.mp4',
+                width: 200, height: 150, video: true
+            }))
+        });
+    }
+
     // Помощник: отвечает заготовкой, а в режиме WM_AI=busy — отказом,
     // как при исчерпанном бесплатном лимите.
     if (req.url.split('?')[0] === '/api/ai') {

@@ -30,6 +30,10 @@
 </head>
 <body class="theme-dark">
 
+<!-- Полоса под системной строкой телефона: время и заряд должны читаться,
+     а не сливаться с шапкой приложения. В браузере её высота нулевая. -->
+<div id="statusbar" aria-hidden="true"></div>
+
 <div id="toast" role="status" aria-live="polite"></div>
 
 <div id="net-banner" hidden>
@@ -133,8 +137,20 @@
         <span id="reply-cancel" class="reply-cancel">✕</span>
     </div>
 
+    <!-- Панель гифок: поиск и сетка превью, открывается над строкой ввода. -->
+    <div class="gif-panel" id="gif-panel" hidden>
+        <div class="gif-head">
+            <input type="search" id="gif-search" placeholder="Поиск гифок"
+                   autocomplete="off" autocapitalize="none" spellcheck="false">
+            <button type="button" class="gif-close" id="gif-close">✕</button>
+        </div>
+        <div class="gif-grid" id="gif-grid"></div>
+        <p class="gif-note" id="gif-note" hidden></p>
+    </div>
+
     <div class="input-bar" id="input-bar">
         <button type="button" id="btn-attach" title="Прикрепить фото">📎</button>
+        <button type="button" id="btn-gif" class="gif-btn" title="Гифки" hidden>GIF</button>
         <input type="file" id="m-file" accept="image/*,video/*" multiple hidden>
         <textarea id="m-input" rows="1" placeholder="Сообщение..."></textarea>
         <button type="button" id="btn-send" class="send" title="Отправить">➤</button>

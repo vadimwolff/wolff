@@ -2,7 +2,7 @@
    Оболочка приложения отдаётся из кэша мгновенно, а свежая версия
    подтягивается в фоне. Запросы к API не кэшируются никогда. */
 
-var CACHE = 'wolffmsg-v58-1';
+var CACHE = 'wolffmsg-v59-1';
 
 var SHELL = [
     './',
@@ -97,7 +97,9 @@ self.addEventListener('notificationclick', function (event) {
     event.notification.close();
 
     var target = './';
-    if (data.room) {
+    if (data.call) {
+        target = './?call=' + encodeURIComponent(data.room || '');
+    } else if (data.room) {
         target = './?open=' + encodeURIComponent(data.room) +
             (data.msg ? '&msg=' + encodeURIComponent(data.msg) : '');
     }
@@ -107,7 +109,10 @@ self.addEventListener('notificationclick', function (event) {
             for (var i = 0; i < list.length; i++) {
                 var client = list[i];
                 if (client.url.indexOf(self.registration.scope) === 0 && 'focus' in client) {
-                    client.postMessage({ type: 'open-chat', room: data.room, msg: data.msg });
+                    client.postMessage({
+                        type: data.call ? 'open-call' : 'open-chat',
+                        room: data.room, msg: data.msg, call: data.call
+                    });
                     return client.focus();
                 }
             }
@@ -156,13 +161,17 @@ self.addEventListener('push', function (event) {
             if (clients[i].visibilityState === 'visible' && clients[i].focused) return null;
         }
 
+        // Звонок ждёт ответа, поэтому его уведомление не гаснет само.
+        var call = !!payload.call;
         return self.registration.showNotification(payload.title || 'WolffMsg', {
             body: payload.body || 'Новое сообщение',
             icon: './assets/icon-192.png',
             badge: './assets/badge-96.png',
-            tag: payload.room || 'wolffmsg',
+            tag: call ? 'call' : (payload.room || 'wolffmsg'),
             renotify: true,
-            data: { room: payload.room, msg: payload.msg }
+            requireInteraction: call,
+            vibrate: call ? [25, 220, 25, 220, 25] : [12],
+            data: { room: payload.room, msg: payload.msg, call: payload.call }
         });
     });
 

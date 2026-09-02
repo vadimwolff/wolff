@@ -174,6 +174,22 @@ button, input, textarea {
 .small { font-size: 13px; }
 .danger { color: var(--danger); }
 
+/* Системная строка телефона стоит на своей полосе — так время, заряд и сеть
+   отделены от шапки приложения. Высота берётся из безопасной зоны экрана:
+   в обычном браузере она нулевая, и полосы не видно. */
+#statusbar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: var(--safe-top);
+    background: var(--panel);
+    border-bottom: 0.5px solid var(--border);
+    z-index: 500;
+    pointer-events: none;
+    transition: background var(--transition);
+}
+
 /* ------------------------------ страницы ------------------------------ */
 
 .page {
@@ -676,6 +692,97 @@ body.searching #page-main .search-row { padding-top: calc(var(--safe-top) + 10px
     display: block;
     margin: 2px 0;
 }
+
+/* -------------------------------- гифки -------------------------------- */
+
+.gif-btn {
+    font-size: 13px !important;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 3px 6px !important;
+    margin-bottom: 6px;
+}
+
+.gif-panel {
+    flex: 0 0 auto;
+    background: var(--card);
+    border-top: 0.5px solid var(--border);
+    padding: 10px 12px 0;
+    max-height: 46vh;
+    display: flex;
+    flex-direction: column;
+    animation: gifIn 0.22s var(--ease-out);
+}
+
+@keyframes gifIn {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.gif-head { display: flex; gap: 10px; align-items: center; }
+
+.gif-head input {
+    flex: 1;
+    min-width: 0;
+    padding: 9px 14px;
+    border-radius: 12px;
+    border: none;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 16px;
+}
+
+.gif-close {
+    border: none;
+    background: var(--hover);
+    color: var(--text-muted);
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    cursor: pointer;
+}
+
+.gif-grid {
+    margin-top: 10px;
+    overflow-y: auto;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+    padding-bottom: 10px;
+}
+
+.gif-item {
+    border: none;
+    padding: 0;
+    background: var(--hover);
+    border-radius: 10px;
+    overflow: hidden;
+    aspect-ratio: 1 / 1;
+    cursor: pointer;
+    transition: transform 0.15s var(--ease-out);
+}
+
+.gif-item:active { transform: scale(0.94); }
+.gif-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.gif-note { color: var(--text-muted); font-size: 13px; padding: 10px 2px; margin: 0; }
+
+/* В переписке место под гифку резервируется заранее, чтобы список не прыгал. */
+.gif-box {
+    width: 200px;
+    max-width: 100%;
+    border-radius: 12px;
+    overflow: hidden;
+    background: rgba(127, 127, 127, 0.18);
+}
+
+.gif-box video { width: 100%; height: 100%; display: block; object-fit: cover; }
+
+/* Запись о звонке — спокойная строка, а не обычное сообщение. */
+.call-log { display: inline-flex; align-items: center; gap: 6px; opacity: 0.9; }
 
 /* -------------------------------- видео -------------------------------- */
 
@@ -1558,6 +1665,102 @@ body.searching #page-main .search-row { padding-top: calc(var(--safe-top) + 10px
 }
 
 /* Полное отключение движения: настройка в приложении или системная */
+/* ==========================================================================
+   ЖИВОСТЬ ИНТЕРФЕЙСА
+
+   Отклик на нажатие, мягкое появление списков и окон. Всё построено на
+   transform и opacity — такие анимации браузер рисует на видеокарте и не
+   пересчитывает разметку, поэтому даже на слабом телефоне не подтормаживает.
+   ========================================================================== */
+
+/* Отклик на нажатие: элемент чуть «проседает» под пальцем. */
+.settings-item:active,
+.f-item:active,
+.theme-card:active,
+.action-item:active,
+.modal-item:active,
+.chip:active,
+.install-tab:active,
+.conn-row:active { transform: scale(0.985); }
+
+.settings-item,
+.f-item,
+.action-item,
+.modal-item,
+.conn-row { transition: transform 0.14s var(--ease-out), background 0.16s; }
+
+.btn-primary, .btn-flat, .auth-btn, .rec-btn, .search-cancel, .link-btn {
+    transition: transform 0.14s var(--ease-out), opacity 0.16s, background 0.16s;
+}
+
+.btn-primary:active, .btn-flat:active, .auth-btn:active, .rec-btn:active { transform: scale(0.96); }
+.hdr-btn:active { transform: scale(0.9); }
+#btn-send:active, #btn-mic:active, #btn-attach:active, .gif-btn:active { transform: scale(0.88); }
+
+/* Список чатов и результаты поиска появляются мягкой волной. */
+#chat-list .f-item { animation: rowIn 0.26s var(--ease-out) backwards; }
+#chat-list .f-item:nth-child(1) { animation-delay: 0.01s; }
+#chat-list .f-item:nth-child(2) { animation-delay: 0.03s; }
+#chat-list .f-item:nth-child(3) { animation-delay: 0.05s; }
+#chat-list .f-item:nth-child(4) { animation-delay: 0.07s; }
+#chat-list .f-item:nth-child(5) { animation-delay: 0.09s; }
+#chat-list .f-item:nth-child(n+6) { animation-delay: 0.11s; }
+
+/* Окна выезжают с лёгкой пружиной. */
+.modal-overlay.show .modal-sheet,
+.modal-overlay.show .modal-menu {
+    animation: sheetIn 0.3s cubic-bezier(0.22, 1.2, 0.36, 1);
+}
+
+@keyframes sheetIn {
+    from { opacity: 0; transform: translateY(24px) scale(0.97); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* Реакция «прыгает» в момент появления. */
+.reaction-badge { animation: popIn 0.24s cubic-bezier(0.22, 1.4, 0.36, 1); }
+
+@keyframes popIn {
+    from { opacity: 0; transform: scale(0.6); }
+    to { opacity: 1; transform: scale(1); }
+}
+
+/* Счётчик непрочитанного и кнопка «вниз». */
+.badge:not(:empty) { animation: popIn 0.26s cubic-bezier(0.22, 1.4, 0.36, 1); }
+.scroll-pill:not([hidden]) { animation: popIn 0.24s var(--ease-out); }
+
+/* Полоса записи: три бегущие полоски вместо резкой точки. */
+.rec-dot {
+    position: relative;
+    width: 14px;
+    height: 14px;
+    border-radius: 0;
+    background: none;
+    animation: none;
+}
+
+.rec-dot::before,
+.rec-dot::after,
+.rec-bar .rec-time::before {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    width: 3px;
+    border-radius: 2px;
+    background: var(--danger);
+    animation: recBars 0.9s ease-in-out infinite;
+}
+
+.rec-dot::before { left: 0; height: 8px; }
+.rec-dot::after { left: 5px; height: 14px; animation-delay: 0.15s; }
+.rec-bar .rec-time::before { left: -4px; height: 6px; animation-delay: 0.3s; }
+.rec-bar .rec-time { position: relative; padding-left: 4px; }
+
+@keyframes recBars {
+    0%, 100% { transform: scaleY(0.5); opacity: 0.7; }
+    50% { transform: scaleY(1); opacity: 1; }
+}
+
 body.no-motion *,
 body.no-motion *::before,
 body.no-motion *::after {
@@ -1857,6 +2060,18 @@ body.no-motion *::after {
 .scroll-pill .pill-count:empty { display: none; }
 
 /* разделитель непрочитанного */
+.locked-note {
+    align-self: center;
+    max-width: 86%;
+    margin: 8px 0;
+    padding: 6px 12px;
+    border-radius: 12px;
+    background: var(--hover);
+    color: var(--text-muted);
+    font-size: 12px;
+    text-align: center;
+}
+
 .unread-sep {
     align-self: stretch;
     text-align: center;

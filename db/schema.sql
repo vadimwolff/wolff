@@ -302,7 +302,7 @@ begin
            and p.proname in ('wm_register', 'wm_login', 'wm_set_password', 'wm_set_keys',
                              'wm_create_channel', 'wm_join_chat', 'wm_leave_chat',
                              'wm_search', 'wm_public_user', 'wm_user_keys',
-                             'wm_push_save', 'wm_push_drop', 'wm_push_targets',
+                             'wm_push_save', 'wm_push_drop', 'wm_push_targets', 'wm_push_call',
                              'wm_guard_channel_post')
     loop
         execute 'drop function if exists ' || r.signature || ' cascade';
@@ -662,6 +662,49 @@ begin
 end;
 $$;
 
+/* Кому доставить уведомление о входящем звонке. Проверка та же: звонок
+   должен существовать и быть только что начатым. */
+create or replace function public.wm_push_call(p_call bigint)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, extensions, pg_temp
+as $$
+declare
+    v_call    record;
+    v_name    text;
+    v_targets jsonb;
+begin
+    select id, room_id, from_id, to_id, kind, created_at
+      into v_call
+      from public.calls
+     where id = p_call;
+
+    if v_call.id is null or v_call.kind <> 'offer'
+       or v_call.created_at < now() - interval '2 minutes' then
+        return jsonb_build_object('ok', false, 'error', 'not_found', 'targets', '[]'::jsonb);
+    end if;
+
+    select coalesce(nullif(name, ''), nickname) into v_name
+      from public.profiles where id = v_call.from_id;
+
+    select coalesce(jsonb_agg(jsonb_build_object(
+               'endpoint', s.endpoint, 'p256dh', s.p256dh, 'auth', s.auth
+           )), '[]'::jsonb)
+      into v_targets
+      from public.push_subscriptions s
+     where s.user_id = v_call.to_id;
+
+    return jsonb_build_object(
+        'ok', true,
+        'room', v_call.room_id,
+        'call', v_call.id,
+        'title', coalesce(v_name, 'WolffMsg'),
+        'targets', v_targets
+    );
+end;
+$$;
+
 create or replace function public.wm_push_targets(p_msg bigint)
 returns jsonb
 language plpgsql
@@ -801,6 +844,7 @@ grant execute on function public.wm_search(text, text)                      to a
 grant execute on function public.wm_push_save(text, text, text, text)      to anon, authenticated;
 grant execute on function public.wm_push_drop(text)                        to anon, authenticated;
 grant execute on function public.wm_push_targets(bigint)                   to anon, authenticated;
+grant execute on function public.wm_push_call(bigint)                      to anon, authenticated;
 
 -- Сама таблица подписок недоступна: ни прочитать чужие адреса, ни записать
 -- их напрямую нельзя — только через функции выше.
@@ -845,8 +889,9 @@ select
       where n.nspname = 'public' and p.proname in
             ('wm_register', 'wm_login', 'wm_set_password',
              'wm_create_channel', 'wm_join_chat', 'wm_leave_chat', 'wm_search',
-             'wm_set_keys', 'wm_push_save', 'wm_push_drop', 'wm_push_targets'))
-        as "функций создано (нужно 11)",
+             'wm_set_keys', 'wm_push_save', 'wm_push_drop', 'wm_push_targets',
+             'wm_push_call'))
+        as "функций создано (нужно 12)",
     (select count(*) from public.profiles)  as "профилей в базе",
     (select count(*) from public.messages)  as "сообщений в базе",
     (select count(*) from information_schema.role_table_grants

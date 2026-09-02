@@ -33,7 +33,8 @@
         notified: 'WM_NOTIFIED',
         recent: 'WM_RECENT',
         sound: 'WM_SOUND',
-        online: 'WM_ONLINE'
+        online: 'WM_ONLINE',
+        aiUrl: 'WM_AI_URL'
     };
 
     var THEMES = [
@@ -100,6 +101,8 @@
         callPoll: null,
         callRing: null,
         callsReady: false,      // есть ли в базе таблица звонков
+        wakeLock: null,
+        gifTimer: null,
         lastCallId: 0,
         services: {},           // имя службы -> адрес, null — службы нет
         serviceTasks: {},
@@ -146,8 +149,14 @@
         toastTimer = setTimeout(function () { t.classList.remove('visible'); }, 2600);
     }
 
+    /* Виброотклик — короткий и почти незаметный: он подсказывает, что
+       нажатие засчитано, и не должен «бить по руке». Длинная вибрация
+       осталась только у входящего звонка, и та мягким пунктиром. */
+    var TAP_BUZZ = 6;
+
     function vibrate(ms) {
-        if (navigator.vibrate) { try { navigator.vibrate(ms); } catch (e) { /* no-op */ } }
+        if (!navigator.vibrate) return;
+        try { navigator.vibrate(ms === undefined ? TAP_BUZZ : ms); } catch (e) { /* no-op */ } 
     }
 
     function delay(ms) {
@@ -255,6 +264,27 @@
     function isPhotoRef(text) { return typeof text === 'string' && text.indexOf('wmimg:') === 0; }
     function isVoiceRef(text) { return typeof text === 'string' && text.indexOf('wmvoice:') === 0; }
     function isVideoRef(text) { return typeof text === 'string' && text.indexOf('wmvid:') === 0; }
+    function isCallLog(text) { return typeof text === 'string' && text.indexOf('wmcall:') === 0; }
+    function isGifRef(text) { return typeof text === 'string' && text.indexOf('wmgif:') === 0; }
+
+    /* «wmgif:<номер вложения>:<ширина>:<высота>» */
+    function gifInfo(text) {
+        var parts = String(text).split(':');
+        return {
+            id: parts[1] || '',
+            width: Math.max(1, Number(parts[2]) || 200),
+            height: Math.max(1, Number(parts[3]) || 200)
+        };
+    }
+
+    /* «wmcall:<секунд>:<состояние>» */
+    function callLogText(text) {
+        var parts = String(text).split(':');
+        var seconds = Math.max(0, Math.round(Number(parts[1]) || 0));
+        var status = parts[2] || 'done';
+        if (seconds) return '📞 Звонок · ' + fmtDuration(seconds);
+        return status === 'declined' ? '📞 Звонок отклонён' : '📞 Пропущенный звонок';
+    }
 
     /* «wmvid:<номер вложения>:<секунд>» */
     function videoInfo(text) {
@@ -888,11 +918,25 @@
                         });
                 }));
             }).then(function (rows) {
+                /* Если ключ комнаты в этот же момент создаёт собеседник, побеждает
+                   тот, кто записал первым: ignore-duplicates не затирает чужую
+                   строку. Раньше здесь стояло merge-duplicates — два ключа
+                   перетирали друг друга, и часть сообщений навсегда оставалась
+                   нечитаемой. */
                 return request('/room_keys', {
                     method: 'POST',
-                    headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+                    headers: { Prefer: 'resolution=ignore-duplicates,return=minimal' },
                     body: rows
-                }).then(function () { return roomKey; });
+                }).then(function () {
+                    // Берём то, что в итоге лежит в базе, а не то, что отправляли.
+                    return request('/room_keys?room_id=eq.' + q(chat.room_id) +
+                        '&user_id=eq.' + q(state.me.id) + '&select=wrapped_key,wrapped_by&limit=1')
+                        .then(function (saved) {
+                            if (saved && saved.length) return unwrapRoomKey(saved[0]);
+                            return roomKey;
+                        })
+                        .catch(function () { return roomKey; });
+                });
             });
         }).catch(function () { return null; });
     }
@@ -1320,9 +1364,12 @@
         document.body.className = 'theme-' + id;
         localStorage.setItem(LS.theme, id);
         applyMotion();
+        // Цвет системной строки берём у той же полосы, что нарисована сверху:
+        // так строка телефона отделена от приложения и на Android, и на iPhone.
         var meta = document.querySelector('meta[name=theme-color]');
+        var strip = getComputedStyle(document.body).getPropertyValue('--panel').trim();
         var theme = THEMES.filter(function (t) { return t.id === id; })[0];
-        if (meta && theme) meta.setAttribute('content', theme.bg);
+        if (meta) meta.setAttribute('content', strip || (theme ? theme.bg : '#0e0e10'));
         renderThemes();
     }
 
@@ -1487,7 +1534,7 @@
        долго. В сообщении остаётся ссылка на вложение, длительность и кадр
        для превью — его видно сразу, до загрузки самого ролика. */
 
-    var VIDEO_MAX_BYTES = 12 * 1024 * 1024;
+    var VIDEO_MAX_BYTES = 16 * 1024 * 1024;
 
     function videoPoster(file) {
         return new Promise(function (resolve, reject) {
@@ -1532,23 +1579,147 @@
         });
     }
 
+    /* Телефон снимает ролики по 20 Мбит/с — целиком такое не отправишь.
+       Поэтому видео пережимается прямо в браузере: кадры перерисовываются в
+       уменьшенный холст, звук берётся из самого файла, и всё это заново
+       записывается с разумным битрейтом. Идёт это в реальном времени, поэтому
+       минутный ролик готовится примерно минуту — с показом процентов. */
+
+    var VIDEO_MAX_SIDE = 640;
+    var VIDEO_BITRATE = 900000;
+    var VIDEO_MAX_SECONDS = 180;
+
+    function compressVideo(file, onProgress) {
+        return new Promise(function (resolve, reject) {
+            if (typeof MediaRecorder === 'undefined') { reject(WMError('no_recorder')); return; }
+
+            var url = URL.createObjectURL(file);
+            var video = document.createElement('video');
+            video.src = url;
+            video.muted = true;
+            video.playsInline = true;
+            video.preload = 'auto';
+
+            var cleanup = function () { URL.revokeObjectURL(url); };
+            var failed = function (err) { cleanup(); reject(err || WMError('video')); };
+
+            video.onerror = function () { failed(WMError('Не удалось прочитать видео')); };
+
+            video.onloadedmetadata = function () {
+                var duration = isFinite(video.duration) ? video.duration : 0;
+                if (duration > VIDEO_MAX_SECONDS) {
+                    failed(WMError('Ролик длиннее ' + Math.round(VIDEO_MAX_SECONDS / 60) +
+                        ' минут — снимите покороче'));
+                    return;
+                }
+
+                var wide = Math.max(video.videoWidth || 640, video.videoHeight || 480);
+                var scale = Math.min(1, VIDEO_MAX_SIDE / wide);
+                var canvas = document.createElement('canvas');
+                canvas.width = Math.max(2, Math.round((video.videoWidth || 640) * scale / 2) * 2);
+                canvas.height = Math.max(2, Math.round((video.videoHeight || 480) * scale / 2) * 2);
+                var g = canvas.getContext('2d');
+
+                var stream = canvas.captureStream(24);
+                try {
+                    // Звук берём из самого файла: элемент приглушён только для
+                    // колонок, дорожка при этом никуда не девается.
+                    var withAudio = video.captureStream ? video.captureStream()
+                        : (video.mozCaptureStream ? video.mozCaptureStream() : null);
+                    if (withAudio) {
+                        withAudio.getAudioTracks().forEach(function (t) { stream.addTrack(t); });
+                    }
+                } catch (e) { /* без звука тоже сойдёт */ }
+
+                var types = ['video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'];
+                var mime = '';
+                for (var i = 0; i < types.length && !mime; i++) {
+                    if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(types[i])) {
+                        mime = types[i];
+                    }
+                }
+
+                var chunks = [];
+                var recorder;
+                try {
+                    recorder = new MediaRecorder(stream, {
+                        mimeType: mime || undefined,
+                        videoBitsPerSecond: VIDEO_BITRATE,
+                        audioBitsPerSecond: 64000
+                    });
+                } catch (e) { failed(WMError('no_recorder')); return; }
+
+                recorder.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
+                recorder.onstop = function () {
+                    cleanup();
+                    var blob = new Blob(chunks, { type: mime || 'video/webm' });
+                    if (!blob.size) { reject(WMError('video_empty')); return; }
+                    resolve({ blob: blob, seconds: Math.round(duration) });
+                };
+
+                var first = null;
+                var draw = function () {
+                    if (video.ended || video.paused) return;
+                    g.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    if (!first) first = canvas.toDataURL('image/jpeg', 0.5);
+                    if (duration && onProgress) onProgress(video.currentTime / duration, first);
+                    requestAnimationFrame(draw);
+                };
+
+                video.onended = function () {
+                    if (recorder.state === 'recording') recorder.stop();
+                };
+
+                video.play().then(function () {
+                    recorder.start();
+                    requestAnimationFrame(draw);
+                }).catch(function () { failed(WMError('Не удалось открыть видео')); });
+            };
+        });
+    }
+
     function sendVideoFile(room, file) {
         if (!state.hasAttachments) {
             toast('Видео требует обновления базы');
             return Promise.resolve();
         }
-        if (file.size > VIDEO_MAX_BYTES) {
-            toast('Видео больше ' + Math.round(VIDEO_MAX_BYTES / 1048576) + ' МБ — ' +
-                'снимите покороче или сожмите');
-            return Promise.resolve();
-        }
+
+        var info = { poster: '', seconds: 0 };
+        var shown = -1;
 
         toast('Готовим видео…');
-        var info = { poster: '', seconds: 0 };
 
-        return videoPoster(file).catch(function () { return info; }).then(function (res) {
-            info = res || info;
-            return readAsDataUrl(file);
+        return compressVideo(file, function (done, poster) {
+            if (poster && !info.poster) info.poster = poster;
+            var percent = Math.round(done * 100);
+            if (percent >= shown + 20) { shown = percent; toast('Готовим видео… ' + percent + '%'); }
+        }).then(function (res) {
+            info.seconds = res.seconds;
+            return res.blob;
+        }).catch(function (err) {
+            // Пережать не вышло — отправим как есть, если размер позволяет.
+            if (err && err.message && err.message.indexOf('Ролик длиннее') === 0) throw err;
+            if (file.size <= VIDEO_MAX_BYTES) {
+                return videoPoster(file).then(function (res) {
+                    info = res || info;
+                    return file;
+                });
+            }
+            throw WMError('Видео слишком большое, а пережать его не получилось');
+        }).then(function (blob) {
+            if (blob.size > VIDEO_MAX_BYTES) {
+                throw WMError('Даже после сжатия ролик больше ' +
+                    Math.round(VIDEO_MAX_BYTES / 1048576) + ' МБ — снимите покороче');
+            }
+            if (!info.poster) {
+                return videoPoster(file).then(function (res) {
+                    if (res && res.poster) info.poster = res.poster;
+                    return blob;
+                }).catch(function () { return blob; });
+            }
+            return blob;
+        }).then(function (blob) {
+            return readAsDataUrl(blob);
         }).then(function (dataUrl) {
             return roomKey(room).then(function (key) {
                 if (!key) return { data: dataUrl, thumb: info.poster };
@@ -1866,6 +2037,142 @@
         });
     }
 
+    /* ==================================================================
+       ГИФКИ
+
+       Поиск идёт через свой сервер: ключ сервиса остаётся на нём, а чужому
+       сервису не видно, кто и что ищет. Выбранная гифка скачивается тем же
+       сервером, шифруется ключом чата и уходит обычным вложением — то есть
+       живёт в переписке так же, как фотография, и никуда не «утекает».
+       ================================================================== */
+
+    function findGifServer() {
+        return findService('gif', function (info, url) {
+            return info.ok ? { url: url, results: info.results || [] } : null;
+        });
+    }
+
+    function gifProxy(server, fileUrl) {
+        return server.url + '?file=' + encodeURIComponent(fileUrl);
+    }
+
+    function setupGifs() {
+        findGifServer().then(function (server) {
+            $('btn-gif').hidden = !server;
+        });
+    }
+
+    function openGifs() {
+        var panel = $('gif-panel');
+        if (!panel.hidden) { closeGifs(); return; }
+
+        panel.hidden = false;
+        panel.classList.add('open');
+        $('gif-search').value = '';
+        searchGifs('');
+    }
+
+    function closeGifs() {
+        var panel = $('gif-panel');
+        panel.classList.remove('open');
+        panel.hidden = true;
+        stopGifPreviews();
+    }
+
+    function stopGifPreviews() {
+        $('gif-grid').innerHTML = '';
+    }
+
+    function renderGifNote(text) {
+        var note = $('gif-note');
+        note.hidden = !text;
+        note.textContent = text || '';
+    }
+
+    function searchGifs(query) {
+        clearTimeout(state.gifTimer);
+        state.gifTimer = setTimeout(function () {
+            findGifServer().then(function (server) {
+                if (!server) { renderGifNote('Поиск гифок не настроен'); return; }
+                renderGifNote('');
+
+                var url = server.url + (query ? '?q=' + encodeURIComponent(query) : '');
+                return fetchTimeout(url, { method: 'GET' }, 12000)
+                    .then(function (res) { return res.json(); })
+                    .then(function (data) {
+                        var list = (data && data.results) || [];
+                        if (!list.length) { renderGifNote('Ничего не нашлось'); }
+                        $('gif-grid').innerHTML = list.map(function (g) {
+                            return '<button type="button" class="gif-item" ' +
+                                'data-gif-url="' + esc(g.url) + '" ' +
+                                'data-w="' + esc(g.width) + '" data-h="' + esc(g.height) + '">' +
+                                '<img loading="lazy" alt="' + esc(g.title) + '" ' +
+                                'src="' + esc(gifProxy(server, g.preview)) + '"></button>';
+                        }).join('');
+                    });
+            }).catch(function () { renderGifNote('Поиск гифок сейчас недоступен'); });
+        }, query ? 320 : 0);
+    }
+
+    function sendGif(fileUrl, width, height) {
+        var room = state.activeRoom;
+        if (!room || !state.hasAttachments) { toast('Гифки требуют обновления базы'); return; }
+
+        closeGifs();
+        toast('Отправляем гифку…');
+
+        findGifServer().then(function (server) {
+            if (!server) throw WMError('Гифки не настроены');
+            return fetchTimeout(gifProxy(server, fileUrl), { method: 'GET' }, 20000);
+        }).then(function (res) {
+            if (!res.ok) throw WMError('Не удалось скачать гифку');
+            return res.blob();
+        }).then(function (blob) {
+            if (blob.size > 8 * 1024 * 1024) throw WMError('Гифка слишком большая');
+            return readAsDataUrl(blob);
+        }).then(function (dataUrl) {
+            return roomKey(room).then(function (key) {
+                return key ? CR.encrypt(key, dataUrl) : dataUrl;
+            }).then(function (payload) {
+                return request('/attachments', {
+                    method: 'POST',
+                    headers: { Prefer: 'return=representation' },
+                    body: { room_id: room, user_id: state.me.id, data: payload }
+                }).then(function (rows) {
+                    var id = rows && rows[0] && rows[0].id;
+                    if (!id) throw WMError('Вложение не сохранено');
+                    state.photos[String(id)] = dataUrl;
+                    sendMessage('wmgif:' + id + ':' + (width || 200) + ':' + (height || 200));
+                });
+            });
+        }).catch(function (err) {
+            if (missingRelation(err)) { state.hasAttachments = false; }
+            toast(err.message || 'Не удалось отправить гифку');
+        });
+    }
+
+    /* Гифки в переписке подгружаются по мере появления на экране — иначе
+       десяток движущихся картинок сразу съел бы и трафик, и плавность. */
+    function hydrateGifs() {
+        var box = $('msg-list');
+        if (!box) return;
+        var nodes = box.querySelectorAll('.gif[data-gif]:not([data-loaded])');
+        var top = box.scrollTop - 400;
+        var bottom = box.scrollTop + box.clientHeight + 400;
+        var started = 0;
+
+        Array.prototype.forEach.call(nodes, function (node) {
+            if (started >= 3) return;
+            if (node.offsetTop < top || node.offsetTop > bottom) return;
+            started++;
+            node.setAttribute('data-loaded', '1');
+            fetchAttachment(node.getAttribute('data-gif')).then(function (data) {
+                node.src = data;
+                node.play().catch(function () { /* автозапуск запретили */ });
+            }).catch(function () { node.removeAttribute('data-loaded'); });
+        });
+    }
+
     /* ------------------------------------------------- кнопка микрофона
 
        Пока в поле ничего не набрано, вместо «отправить» стоит микрофон.
@@ -1894,7 +2201,7 @@
             if (!hold || !rec || rec.locked) return;
             if (e.clientX - hold.x < -70) {              // увели палец влево — отмена
                 hold.cancelled = true;
-                vibrate(15);
+                vibrate();
                 stopRecording(true);
                 toast('Запись отменена');
                 hold = null;
@@ -2372,7 +2679,7 @@
         else if (!preview && c.kind === 'ai') preview = 'Спросите о чём угодно';
         else if (!preview) preview = c.kind === 'channel' ? 'Канал' : 'Нажмите, чтобы открыть';
         else if (isImage(preview)) preview = '📷 Фото';
-        else if (CR && CR.isEncrypted(preview)) preview = '🔒 Зашифрованное сообщение';
+        else if (CR && CR.isEncrypted(preview)) preview = 'Сообщение';
 
         var icon = c.kind === 'channel' ? ' 📣'
             : (c.kind === 'group' ? ' 👥'
@@ -2481,7 +2788,7 @@
                 var m = cached[i];
                 var text = m && typeof m.text === 'string' ? m.text : '';
                 if (!text || isPhoto(text) || isVoiceRef(text) || isVideoRef(text) ||
-                    (CR && CR.isEncrypted(text))) continue;
+                    isCallLog(text) || isGifRef(text) || (CR && CR.isEncrypted(text))) continue;
                 if (text.toLowerCase().indexOf(needle) < 0) continue;
                 out.push({
                     room_id: chat.room_id,
@@ -2912,7 +3219,7 @@
             state.selectedRoom = room;
             $('context-bar').classList.add('show');
             renderChatList();
-            vibrate(45);
+            vibrate();
         }, 450);
     }
 
@@ -3123,6 +3430,7 @@
 
     function closeChat() {
         stopVoice();
+        closeGifs();
         if (rec) stopRecording(true);
         var current = state.activeChat;
         if (isCommentsRoom(current) && current.parentRoom) {
@@ -3354,6 +3662,14 @@
                 ' src="' + esc(ready || m.thumbBody || TRANSPARENT_PIXEL) + '"' +
                 ' alt="фото" data-photo="1" data-att="' + esc(id) + '"' +
                 (ready ? ' data-loaded="1"' : '') + '>';
+        } else if (isGifRef(body)) {
+            var gif = gifInfo(body);
+            // Место под гифку резервируется заранее — переписка не «прыгает».
+            content = '<div class="gif-box" style="aspect-ratio:' + esc(gif.width) + '/' +
+                esc(gif.height) + '"><video class="gif" data-gif="' + esc(gif.id) + '"' +
+                ' muted loop playsinline preload="none"></video></div>';
+        } else if (isCallLog(body)) {
+            content = '<span class="call-log">' + esc(callLogText(body)) + '</span>';
         } else if (isVideoRef(body)) {
             var vid = videoInfo(body);
             var poster = m.thumbBody || '';
@@ -3457,10 +3773,17 @@
         var isGroup = state.activeChat && state.activeChat.kind !== 'dm' &&
             !isSaved(state.activeChat) && !isAi(state.activeChat);
 
+        /* Сообщения, зашифрованные ключом, которого у нас нет (например,
+           присланные до того, как чат обзавёлся общим ключом), в переписке не
+           показываем: вместо стены замков — одна спокойная строка сверху. */
+        var visible = state.msgs.filter(function (m) { return !m.locked; });
+        var hidden = state.msgs.length - visible.length;
+
         var desired = [];
         var lastDay = '';
         var unreadShown = false;
-        state.msgs.forEach(function (m) {
+        if (hidden) desired.push({ key: 'locked-note', note: hidden });
+        visible.forEach(function (m) {
             var day = fmtDay(m.created_at);
             if (day && day !== lastDay) {
                 desired.push({ key: 'sep:' + day, day: day });
@@ -3490,6 +3813,13 @@
             } else if (item.m) {
                 node = createBubble(item.m, isGroup);
                 if (animate) node.classList.add('appear');
+            } else if (item.note) {
+                node = document.createElement('div');
+                node.className = 'locked-note';
+                node.setAttribute('data-key', item.key);
+                node.textContent = 'Скрыто ' + item.note + ' ' +
+                    plural(item.note, 'сообщение', 'сообщения', 'сообщений') +
+                    ': они зашифрованы прежним ключом';
             } else if (item.unread) {
                 node = document.createElement('div');
                 node.className = 'unread-sep';
@@ -3523,6 +3853,7 @@
         }
         updateScrollPill();
         hydratePhotos();
+        hydrateGifs();
     }
 
     function isAtBottom() {
@@ -3583,7 +3914,9 @@
 
         var previewText = isPhoto(text) ? '📷 Фото'
             : (isVoiceRef(text) ? '🎤 Голосовое сообщение'
-                : (isVideoRef(text) ? '🎬 Видео' : String(text).slice(0, 70)));
+                : (isVideoRef(text) ? '🎬 Видео'
+                    : (isCallLog(text) ? callLogText(text)
+                        : (isGifRef(text) ? '🎞 GIF' : String(text).slice(0, 70)))));
 
         roomKey(room).then(function (key) {
             if (!key) return { text: text, quote: reply ? reply.preview : null, preview: previewText };
@@ -3646,6 +3979,10 @@
             if (state.activeRoom === room) { renderMessages(false); cacheMessages(room); }
             markRead(room, stamp);
             if (saved && saved.id) pingPush(saved.id);
+            // «@WolffAI» в любом чате: помощник отвечает прямо там, куда его
+            // позвали, — добавлять его в участники не нужно.
+            if (!isAi(findChat(room)) && /@wolffai\b/i.test(String(text))) askAi(room);
+
             if (isAi(findChat(room))) {
                 // Помощник понимает только текст: на фото и голос отвечаем сразу.
                 if (isPhoto(text) || isVoiceRef(text) || isVideoRef(text)) {
@@ -3807,7 +4144,7 @@
             timer: setTimeout(function () {
                 if (!gesture) return;
                 gesture.opened = true;
-                vibrate(15);
+                vibrate();
                 openPicker(bubble, id);
             }, HOLD_MS)
         };
@@ -3835,7 +4172,7 @@
         if (ready !== gesture.ready) {
             gesture.ready = ready;
             gesture.node.classList.toggle('swipe-ready', ready);
-            if (ready) vibrate(10);
+            if (ready) vibrate();
         }
     }
 
@@ -3853,7 +4190,7 @@
         clearGesture(true);
 
         if (reply && !reply.pending && canPost(state.activeChat)) {
-            vibrate(12);
+            vibrate();
             startReply(reply);
             return;
         }
@@ -3865,8 +4202,8 @@
     function tapHitsControl(e) {
         var el = e && e.target && e.target.closest ? e.target : null;
         if (!el) return false;
-        return !!el.closest('a.link, .voice, .reaction-badge, .quote, .author, ' +
-            '[data-comments], [data-photo], .msg-menu');
+        return !!el.closest('a.link, .voice, .video, .gif-box, .call-log, .reaction-badge, .quote, ' +
+            '.author, [data-comments], [data-photo], .msg-menu');
     }
 
     function findMessage(id) {
@@ -3967,7 +4304,7 @@
 
         if (!had) {
             reactions[emoji] = (reactions[emoji] || []).concat([state.me.id]);
-            vibrate(25);
+            vibrate();
         }
 
         msg.reactions = reactions;
@@ -4482,10 +4819,13 @@
         var send = function (text) {
             return request('/calls', {
                 method: 'POST',
+                headers: { Prefer: 'return=representation' },
                 body: {
                     room_id: room, from_id: state.me.id, to_id: to,
                     kind: kind, payload: text
                 }
+            }).then(function (rows) {
+                return rows && rows[0] ? rows[0].id : null;
             }).catch(function () { return null; });
         };
         if (!payload) return send(null);
@@ -4533,6 +4873,51 @@
         setCallStatus(fmtDuration((Date.now() - state.call.startedAt) / 1000));
     }
 
+    /* После разговора в переписке остаётся строчка: состоялся звонок или нет
+       и сколько длился. Пишет её тот, кто звонил, — чтобы не было двух записей. */
+    function logCall(call) {
+        if (!call || !call.outgoing || call.logged) return;
+        call.logged = true;
+
+        var seconds = call.startedAt ? Math.round((Date.now() - call.startedAt) / 1000) : 0;
+        var status = seconds ? 'done' : (call.declined ? 'declined' : 'missed');
+        var text = 'wmcall:' + seconds + ':' + status;
+        var preview = seconds ? '📞 Звонок · ' + fmtDuration(seconds)
+            : (status === 'declined' ? '📞 Звонок отклонён' : '📞 Пропущенный звонок');
+
+        roomKey(call.room).then(function (key) {
+            if (!key) return { text: text, preview: preview };
+            return Promise.all([CR.encrypt(key, text), CR.encrypt(key, preview)])
+                .then(function (p) { return { text: p[0], preview: p[1] }; });
+        }).then(function (payload) {
+            var body = {
+                room_id: call.room, user_id: state.me.id, user_name: state.me.name,
+                text: payload.text, preview: payload.preview,
+                reactions: {}, created_at: new Date().toISOString()
+            };
+            return request('/messages', { method: 'POST', body: body }).catch(function (err) {
+                if (err.status !== 400) throw err;
+                delete body.preview;
+                return request('/messages', { method: 'POST', body: body });
+            });
+        }).then(function () {
+            if (state.activeRoom === call.room) pollChat(false);
+        }).catch(function () { /* запись о звонке не критична */ });
+    }
+
+    /* Пока идёт разговор, экран не должен гаснуть. */
+    function keepAwake(on) {
+        if (!navigator.wakeLock) return;
+        if (on) {
+            navigator.wakeLock.request('screen')
+                .then(function (lock) { state.wakeLock = lock; })
+                .catch(function () { /* не дали — не страшно */ });
+        } else if (state.wakeLock) {
+            try { state.wakeLock.release(); } catch (e) { /* уже отпущен */ }
+            state.wakeLock = null;
+        }
+    }
+
     function endCall(reason, silent) {
         var call = state.call;
         state.call = null;
@@ -4547,6 +4932,8 @@
         }
         $('call-audio').srcObject = null;
         showCall(false);
+        keepAwake(false);
+        if (call) logCall(call);
         if (reason) toast(reason);
     }
 
@@ -4563,6 +4950,7 @@
             if (pc.connectionState === 'connected') {
                 clearTimeout(state.callRing);
                 call.startedAt = call.startedAt || Date.now();
+                keepAwake(true);
                 $('call-mute').hidden = false;
                 $('call-accept').hidden = true;
                 callTick();
@@ -4620,7 +5008,8 @@
                 .then(function () {
                     if (state.call !== call) return null;
                     return callSignal(call.room, peerId, 'offer',
-                        JSON.stringify(pc.localDescription));
+                        JSON.stringify(pc.localDescription))
+                        .then(function (id) { if (id) pingCall(id); });
                 });
         }).catch(function () {
             endCall('Нужен доступ к микрофону', true);
@@ -4646,7 +5035,7 @@
         $('call-mute').hidden = true;
         setCallStatus('Входящий звонок');
         showCall(true);
-        vibrate(200);
+        vibrate([25, 220, 25, 220, 25]);   // деликатный пунктир входящего звонка
 
         if (document.hidden) {
             showNotification(call.name, 'Входящий звонок', row.room_id, null);
@@ -4700,6 +5089,7 @@
 
         if (row.kind === 'end') {
             if (state.call && state.call.peerId === row.from_id) {
+                if (!state.call.startedAt) state.call.declined = true;
                 endCall(state.call.startedAt ? 'Звонок завершён' : 'Звонок отклонён', true);
             }
             return Promise.resolve();
@@ -4840,6 +5230,11 @@
             if (base && /\/api\/db\/?$/.test(base)) add(base.replace(/\/api\/db\/?$/, '/api/' + name));
         };
         var custom = name === 'push' ? CFG.pushUrl : CFG.aiUrl;
+        if (name === 'ai') {
+            // Адрес, указанный вручную в настройках, проверяем первым.
+            try { add((localStorage.getItem(LS.aiUrl) || '').replace(/\/+$/, '')); }
+            catch (e) { /* нет доступа к хранилищу */ }
+        }
 
         if (custom) add(String(custom).replace(/\/+$/, ''));
         fromBase(api.base);
@@ -4942,6 +5337,20 @@
         }).catch(function () { return null; });
     }
 
+    /* Уведомление о входящем звонке — чтобы телефон зазвонил и при закрытом
+       приложении. Проверку «звонок настоящий» делает сама база. */
+    function pingCall(callId) {
+        if (state.services.push === null) return;
+        findPushServer().then(function (server) {
+            if (!server) return;
+            fetchTimeout(server.url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ call: callId })
+            }, 8000).catch(function () { /* не критично */ });
+        });
+    }
+
     /* Просим сервер разослать уведомление о только что отправленном сообщении.
        Ответ не важен: если сервера нет, всё остальное работает как прежде. */
     function pingPush(msgId) {
@@ -4976,10 +5385,23 @@
         updateAiPill(true).then(function (server) {
             if (server) { toast('WolffAI на связи'); return; }
             confirmBox('WolffAI не найден',
-                'Помощнику нужен сервер с ключом Gemini. Проверьте, что проект развёрнут ' +
-                'на Vercel, в его настройках задан GEMINI_API_KEY и сделан Redeploy. ' +
-                'Если сайт открыт не с того же домена, укажите адрес сервера в разделе «Соединение».',
-                'Открыть «Соединение»', openConnection);
+                'Помощнику нужен сервер с ключом Gemini. Проверьте, что проект развёрнут, ' +
+                'в его настройках задан ключ и сделан Redeploy. Если сайт открыт с одного ' +
+                'адреса, а сервер живёт на другом, адрес можно указать вручную.',
+                'Указать адрес', function () {
+                    promptBox('Адрес помощника',
+                        'Вставьте адрес сервера — подойдёт и корень сайта, и путь к /api/ai',
+                        '', function (val) {
+                            var url = String(val || '').trim().replace(/\/+$/, '');
+                            if (!url) return;
+                            if (!/^https?:\/\//i.test(url)) { toast('Адрес должен начинаться с https://'); return; }
+                            if (!/\/api\/ai$/.test(url)) url = url.replace(/\/api\/db$/, '') + '/api/ai';
+                            localStorage.setItem(LS.aiUrl, url);
+                            updateAiPill(true).then(function (found) {
+                                toast(found ? 'WolffAI на связи' : 'По этому адресу помощник не отвечает');
+                            });
+                        });
+                });
         });
     }
 
@@ -5132,6 +5554,7 @@
         if (navigator.serviceWorker) {
             navigator.serviceWorker.addEventListener('message', function (event) {
                 var data = event.data || {};
+                if (data.type === 'open-call') { pollCalls(); return; }
                 if (data.type === 'open-chat') openFromNotification(data.room, data.msg);
             });
         }
@@ -5142,6 +5565,12 @@
             var msg = params.get('msg');
             history.replaceState(null, '', location.pathname);
             setTimeout(function () { openFromNotification(room, msg); }, 600);
+        }
+
+        // Приложение открыли из уведомления о звонке — сразу ищем вызов.
+        if (params.has('call')) {
+            history.replaceState(null, '', location.pathname);
+            setTimeout(function () { pollCalls(); }, 800);
         }
     }
 
@@ -5248,6 +5677,7 @@
         ensureAi();
         mirrorPrefs();
         setupCalls();
+        setupGifs();
         touchOnline();
         clearInterval(state.presenceTimer);
         state.presenceTimer = setInterval(function () {
@@ -5388,6 +5818,15 @@
 
         $('btn-send').addEventListener('click', function () { sendMessage(); });
         $('btn-attach').addEventListener('click', function () { $('m-file').click(); });
+        $('btn-gif').addEventListener('click', openGifs);
+        $('gif-close').addEventListener('click', closeGifs);
+        $('gif-search').addEventListener('input', function () { searchGifs(this.value.trim()); });
+        $('gif-grid').addEventListener('click', function (e) {
+            var item = e.target.closest('.gif-item');
+            if (!item) return;
+            sendGif(item.getAttribute('data-gif-url'),
+                Number(item.getAttribute('data-w')), Number(item.getAttribute('data-h')));
+        });
         $('m-file').addEventListener('change', function () { handlePhotoFile(this); });
         $('m-input').addEventListener('input', function () { autoGrow(this); updateComposer(); });
         bindVoiceButton();
@@ -5638,6 +6077,7 @@
         findPushServer: findPushServer,
         findAiServer: findAiServer,
         serviceUrls: serviceUrls,
+        setTheme: setTheme,
         state: state,
         api: api,
         rpc: rpc
