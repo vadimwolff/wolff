@@ -2,7 +2,7 @@
    Оболочка приложения отдаётся из кэша мгновенно, а свежая версия
    подтягивается в фоне. Запросы к API не кэшируются никогда. */
 
-var CACHE = 'wolffmsg-v59-1';
+var CACHE = 'wolffmsg-v60-1';
 
 var SHELL = [
     './',
@@ -76,7 +76,32 @@ self.addEventListener('fetch', function (event) {
         return;
     }
 
-    // Статика: мгновенно из кэша, обновление тихо подтягивается в фоне.
+    // Код приложения — сначала из сети (с коротким ожиданием), чтобы правки
+    // доезжали сразу, а не через один запуск. Нет сети — берём из кэша.
+    if (/\.(?:js|css)$/.test(url.pathname)) {
+        event.respondWith(
+            new Promise(function (resolve, reject) {
+                var settled = false;
+                var done = function (res) { if (!settled) { settled = true; resolve(res); } };
+                var timer = setTimeout(function () {
+                    caches.match(req).then(function (hit) { if (hit) done(hit); });
+                }, 2500);
+                fromNetwork(req).then(function (res) {
+                    clearTimeout(timer);
+                    done(res);
+                }, function (err) {
+                    clearTimeout(timer);
+                    caches.match(req).then(function (hit) {
+                        if (hit) done(hit);
+                        else if (!settled) { settled = true; reject(err); }
+                    });
+                });
+            })
+        );
+        return;
+    }
+
+    // Остальная статика: мгновенно из кэша, обновление тихо подтягивается в фоне.
     event.respondWith(
         caches.match(req).then(function (hit) {
             var network = fromNetwork(req).catch(function () { return hit; });

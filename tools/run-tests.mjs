@@ -31,9 +31,11 @@ const servers = [
     start(8125, { WM_DENY: 'warmup' }),     // кеш API прогревается
     start(8126, { WM_DENY: 'always' }),     // кеш API не обновился
     start(8127, { WM_OLDCHATS: '1' }),      // база без колонок каналов и ответов
-    start(8128, { WM_AI: 'busy' })          // помощник исчерпал бесплатный лимит
+    start(8128, { WM_AI: 'busy' }),         // помощник исчерпал бесплатный лимит
+    start(8129, { WM_NOAPI: '1' }),         // сайт без серверной части (GitHub Pages)
+    start(8443, { WM_TLS: '1' })            // сервер приложения на другом домене, по https
 ];
-await new Promise((r) => setTimeout(r, 1500));
+await new Promise((r) => setTimeout(r, 3000));
 
 let code = 0;
 code += await run('tools/e2e.mjs', { WM_BASE: 'http://localhost:8123' });
@@ -57,6 +59,10 @@ code += await run('tools/e2e-v57.mjs', {
 });
 code += await run('tools/e2e-v58.mjs', { WM_BASE: 'http://localhost:8123' });
 code += await run('tools/e2e-v59.mjs', { WM_BASE: 'http://localhost:8123' });
+code += await run('tools/e2e-v60.mjs', {
+    WM_BASE_TLS: 'https://localhost:8443',
+    WM_BASE_SITE: 'http://localhost:8129'
+});
 code += await run('tools/e2e-push.mjs');
 code += await run('tools/e2e-schema.mjs', {
     WM_BASE_WARMUP: 'http://localhost:8125',

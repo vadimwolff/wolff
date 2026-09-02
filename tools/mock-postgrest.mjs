@@ -11,9 +11,12 @@
  * ========================================================================== */
 
 import http from 'node:http';
+import https from 'node:https';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -54,6 +57,11 @@ const db = {
 
 /* WM_AI=busy — помощник «перегружен», WM_AI=off — ключа нет. */
 const AI_MODE = process.env.WM_AI || '';
+
+/* WM_NOAPI=1 — сайт без серверной части: так выглядит копия на GitHub Pages.
+   Отдаются только файлы и прямой адрес базы, а /api/... отвечает «нет такой
+   страницы» — ровно как на настоящем Pages. */
+const NO_API = process.env.WM_NOAPI === '1';
 
 /* Что ушло на сервер уведомлений: тесты смотрят сюда. */
 const pushLog = [];
@@ -514,8 +522,13 @@ function handleApi(req, res, rest, body) {
 
 /* ---------------------------------------------------------------- сервер */
 
-const server = http.createServer((req, res) => {
+const handler = (req, res) => {
     if (req.method === 'OPTIONS') return json(res, 204, null);
+
+    if (NO_API && req.url.split('?')[0].startsWith('/api/')) {
+        res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
+        return res.end('<!doctype html><title>404</title><h1>Not found</h1>');
+    }
 
     // Гифки: список и сам файл, как это делает серверный прокси.
     if (req.url.split('?')[0] === '/api/gif') {
@@ -596,10 +609,28 @@ const server = http.createServer((req, res) => {
             json(res, 500, { message: String(err) });
         }
     });
-});
+};
+
+/* WM_TLS=1 — стенд по https. Нужен, чтобы проверить связку «сайт на одном
+   адресе, сервер на другом»: браузер пускает запросы только на https. */
+const TLS = process.env.WM_TLS === '1';
+
+function selfSigned() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wmtls-'));
+    const key = path.join(dir, 'key.pem');
+    const cert = path.join(dir, 'cert.pem');
+    execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+        '-keyout', key, '-out', cert, '-days', '2', '-subj', '/CN=localhost'],
+    { stdio: 'ignore' });
+    return { key: fs.readFileSync(key), cert: fs.readFileSync(cert) };
+}
+
+const server = TLS ? https.createServer(selfSigned(), handler) : http.createServer(handler);
 
 server.listen(PORT, () => {
-    console.log('mock server: http://localhost:' + PORT + '/?api=http://localhost:' + PORT + '/rest/v1');
+    const scheme = TLS ? 'https' : 'http';
+    console.log('mock server: ' + scheme + '://localhost:' + PORT +
+        '/?api=' + scheme + '://localhost:' + PORT + '/rest/v1');
 });
 
 export { db };

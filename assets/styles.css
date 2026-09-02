@@ -1343,7 +1343,9 @@ body.searching #page-main .search-row { padding-top: calc(var(--safe-top) + 10px
 
 .modal-sheet { padding: 20px 18px 12px; }
 .modal-sheet h3 { margin: 0 0 8px; font-size: 18px; }
-.modal-sheet p { margin: 0 0 14px; line-height: 1.45; }
+/* Переносы строк в пояснении сохраняются: так список проверенных адресов
+   читается построчно, а обычный текст переносится как раньше. */
+.modal-sheet p { margin: 0 0 14px; line-height: 1.45; white-space: pre-line; }
 .modal-sheet .auth-input { text-align: left; margin-bottom: 10px; }
 
 @keyframes slideUp {

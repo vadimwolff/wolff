@@ -34,6 +34,7 @@
         recent: 'WM_RECENT',
         sound: 'WM_SOUND',
         online: 'WM_ONLINE',
+        server: 'WM_SERVER',
         aiUrl: 'WM_AI_URL'
     };
 
@@ -106,6 +107,7 @@
         lastCallId: 0,
         services: {},           // имя службы -> адрес, null — службы нет
         serviceTasks: {},
+        serviceTried: {},       // что перебрали при поиске — видно в настройках
         aiBusy: false,
         firstChatPaint: true,
         serverChats: true,
@@ -2386,6 +2388,9 @@
         'Попробуйте, пожалуйста, чуть позже.';
     var AI_SETUP_TEXT = 'WolffAI ещё не подключён. Владельцу сайта нужно добавить ключ ' +
         'Gemini в настройках сервера — после этого я заработаю.';
+    var AI_NOSERVER_TEXT = 'Не нахожу свой сервер: похоже, приложение открыто с адреса, ' +
+        'где его нет. Откройте Настройки → Помощник WolffAI → Указать адрес и вставьте ' +
+        'адрес сервера — после этого я отвечу.';
 
     function askAi(room) {
         if (state.aiBusy) return Promise.resolve();
@@ -2395,7 +2400,7 @@
         var history = aiHistory();
 
         return findAiServer().then(function (server) {
-            if (!server) return { ok: false, error: 'not_configured' };
+            if (!server) return { ok: false, error: 'no_server' };
             return fetchTimeout(server.url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -2403,6 +2408,7 @@
             }, 35000).then(function (res) { return res.json(); });
         }).then(function (res) {
             if (res && res.ok && res.text) return postAiMessage(room, res.text);
+            if (res && res.error === 'no_server') return postAiMessage(room, AI_NOSERVER_TEXT);
             if (res && res.error === 'not_configured') return postAiMessage(room, AI_SETUP_TEXT);
             return postAiMessage(room, AI_BUSY_TEXT);
         }).catch(function () {
@@ -5217,57 +5223,169 @@
        работает по-прежнему, просто уведомления приходят только пока
        приложение запущено. */
 
-    /* Серверные службы (уведомления, помощник) живут рядом с прокси базы —
-       по адресу /api/<имя> — или на домене самого сайта.
+    /* Серверные службы — уведомления, помощник WolffAI, поиск гифок — живут по
+       адресу /api/<имя> на сервере приложения (Vercel).
 
-       Ищем рядом со ВСЕМИ известными адресами, а не только с активным: сайт может
-       лежать на GitHub Pages, а сервер — на другом домене, и активным при этом
-       окажется совсем другой канал связи. */
+       Сайт может лежать и отдельно от сервера: на GitHub Pages серверной части
+       нет вовсе, там только файлы. Поэтому адрес сервера можно задать один раз —
+       полем serverUrl в config.js или вручную в настройках, — и он проверяется
+       первым; если он не задан, ищем рядом с адресом прокси базы и на домене
+       самого сайта.
+
+       Из любой записи адреса делаем «корень сервера»: и «мойпроект.vercel.app»,
+       и «https://мойпроект.vercel.app/api/ai», и адрес прокси базы приводятся
+       к одному виду — https://мойпроект.vercel.app. */
+    function serverOrigin(raw) {
+        var value = String(raw || '').trim();
+        if (!value) return '';
+        if (!/^https?:\/\//i.test(value)) {
+            // «имя.vercel.app» — тоже адрес: дописываем https сами.
+            if (/^[^\s/:?#]+\.[^\s/:?#]{2,}([/?#]|$)/.test(value)) value = 'https://' + value;
+            else return '';
+        }
+        try {
+            var u = new URL(value);
+            return /^https?:$/.test(u.protocol) ? u.origin : '';
+        } catch (e) { return ''; }
+    }
+
+    /* Адрес сервера, заданный человеком или в настройках сайта. Он главнее
+       всего остального: раз указали — туда и идём. */
+    function chosenServers() {
+        var list = [];
+        var add = function (raw) {
+            var origin = serverOrigin(raw);
+            if (origin && list.indexOf(origin) < 0) list.push(origin);
+        };
+        try { add(localStorage.getItem(LS.server)); } catch (e) { /* нет доступа */ }
+        add(CFG.serverUrl);
+        return list;
+    }
+
+    /* Где ещё имеет смысл поискать: на домене своего сервера базы и на самом
+       сайте. Прямые адреса базы (Supabase и прокси) не трогаем — служб там
+       не бывает, а лишние запросы только тянут время. */
+    function otherOrigins() {
+        var list = [];
+        var chosen = chosenServers();
+        var add = function (raw) {
+            var origin = serverOrigin(raw);
+            if (origin && chosen.indexOf(origin) < 0 && list.indexOf(origin) < 0) list.push(origin);
+        };
+        var own = function (base) { if (base && String(base).indexOf('/api/') > 0) add(base); };
+        own(api.base);
+        try { own(localStorage.getItem(LS.api)); } catch (e) { /* нет доступа */ }
+        candidates().forEach(function (c) { own(c.url); });
+        add(location.href);
+        return list;
+    }
+
     function serviceUrls(name) {
         var list = [];
         var add = function (url) { if (url && list.indexOf(url) < 0) list.push(url); };
-        var fromBase = function (base) {
-            if (base && /\/api\/db\/?$/.test(base)) add(base.replace(/\/api\/db\/?$/, '/api/' + name));
-        };
-        var custom = name === 'push' ? CFG.pushUrl : CFG.aiUrl;
+        var custom = name === 'push' ? CFG.pushUrl : (name === 'ai' ? CFG.aiUrl : '');
+
         if (name === 'ai') {
-            // Адрес, указанный вручную в настройках, проверяем первым.
+            // Адрес, указанный вручную в старых версиях, проверяем первым.
             try { add((localStorage.getItem(LS.aiUrl) || '').replace(/\/+$/, '')); }
             catch (e) { /* нет доступа к хранилищу */ }
         }
-
         if (custom) add(String(custom).replace(/\/+$/, ''));
+
+        chosenServers().forEach(function (origin) { add(origin + '/api/' + name); });
+
+        // Прокси базы может лежать и в подпапке — тогда служба рядом с ним.
+        var fromBase = function (base) {
+            if (base && /\/api\/db\/?$/.test(base)) add(base.replace(/\/api\/db\/?$/, '/api/' + name));
+        };
         fromBase(api.base);
         try { fromBase(localStorage.getItem(LS.api)); } catch (e) { /* нет доступа */ }
         candidates().forEach(function (c) { fromBase(c.url); });
+
+        otherOrigins().forEach(function (origin) { add(origin + '/api/' + name); });
         add(new URL('api/' + name, location.href).href.replace(/\/+$/, ''));
         return list;
     }
 
     /* Адрес службы ищем один раз и запоминаем на время сессии.
-       accept решает, годится ли ответ; результат null означает «службы нет». */
+       accept решает, годится ли ответ; результат null означает «службы нет».
+       Заодно записываем, что и почему не подошло: это видно в настройках. */
     function findService(name, accept) {
         if (state.services[name] !== undefined) return Promise.resolve(state.services[name]);
         if (state.serviceTasks[name]) return state.serviceTasks[name];
 
         var urls = serviceUrls(name);
+        var tried = [];
+        state.serviceTried[name] = tried;
+
+        var note = function (url, why) { tried.push({ url: url, why: why }); };
         var step = function (i) {
             if (i >= urls.length) return null;
-            return fetchTimeout(urls[i], { method: 'GET' }, 6000)
-                .then(function (res) { return res.ok ? res.json() : null; })
+            var url = urls[i];
+            return fetchTimeout(url, { method: 'GET' }, 6000)
+                .then(function (res) {
+                    if (!res.ok) { note(url, 'ответ ' + res.status); return null; }
+                    // Сайт без сервера отдаёт на этот адрес обычную страницу —
+                    // такой ответ службой не считаем.
+                    return res.json().catch(function () {
+                        note(url, 'здесь не сервер');
+                        return null;
+                    });
+                })
                 .then(function (info) {
-                    var value = info ? accept(info, urls[i]) : null;
+                    var value = info ? accept(info, url) : null;
+                    if (info && !value) note(url, 'служба не настроена');
                     return value || step(i + 1);
                 })
-                .catch(function () { return step(i + 1); });
+                .catch(function () {
+                    note(url, 'нет ответа');
+                    return step(i + 1);
+                });
         };
 
         state.serviceTasks[name] = step(0).then(function (found) {
             state.services[name] = found || null;
             delete state.serviceTasks[name];
+            // Нашли сервер — запоминаем его: в следующий раз найдутся сразу и
+            // уведомления, и гифки, даже если сайт открыт с другого адреса.
+            if (found && found.url) rememberServer(found.url);
             return state.services[name];
         });
         return state.serviceTasks[name];
+    }
+
+    /* Куда приложение ходит за серверными службами. Пустая строка — «не задан». */
+    function currentServer() {
+        try { return localStorage.getItem(LS.server) || ''; } catch (e) { return ''; }
+    }
+
+    function rememberServer(serviceUrl) {
+        var origin = serverOrigin(serviceUrl);
+        if (!origin || origin === serverOrigin(location.href)) return;
+        try {
+            if (localStorage.getItem(LS.server) !== origin) localStorage.setItem(LS.server, origin);
+        } catch (e) { /* нет доступа к хранилищу */ }
+    }
+
+    /* Адрес сервера, указанный человеком. Одна запись включает сразу помощника,
+       уведомления при закрытом приложении и гифки. */
+    function setServer(raw) {
+        var origin = serverOrigin(raw);
+        if (!origin) return '';
+        try {
+            localStorage.setItem(LS.server, origin);
+            localStorage.removeItem(LS.aiUrl);   // старая настройка больше не нужна
+        } catch (e) { /* нет доступа к хранилищу */ }
+        forgetServices();
+        return origin;
+    }
+
+    function forgetServices() {
+        ['ai', 'push', 'gif'].forEach(function (name) {
+            delete state.services[name];
+            delete state.serviceTasks[name];
+            delete state.serviceTried[name];
+        });
     }
 
     function findPushServer() {
@@ -5381,27 +5499,45 @@
         });
     }
 
+    /* Короткий отчёт о поиске: какие адреса проверили и что там оказалось. */
+    function aiReport() {
+        var tried = state.serviceTried.ai || [];
+        if (!tried.length) return '';
+        return tried.slice(0, 4).map(function (t) {
+            var host = t.url;
+            try { host = new URL(t.url).host; } catch (e) { /* оставим как есть */ }
+            return '• ' + host + ' — ' + t.why;
+        }).join('\n');
+    }
+
+    function askServerAddress() {
+        promptBox('Адрес сервера',
+            'Вставьте адрес вашего проекта на Vercel — например https://имя.vercel.app. ' +
+            'Подойдёт и ссылка на /api/ai: приложение само возьмёт из неё нужное.',
+            currentServer(), function (val) {
+                var origin = setServer(val);
+                if (!origin) { toast('Не похоже на адрес сайта'); return; }
+                updateAiPill(true).then(function (found) {
+                    if (!found) { toast('По этому адресу помощник не отвечает'); return; }
+                    toast('WolffAI на связи');
+                    // Тот же сервер умеет присылать уведомления и искать гифки.
+                    if (notifyEnabled()) enablePush();
+                    setupGifs();
+                });
+            });
+    }
+
     function checkAi() {
         updateAiPill(true).then(function (server) {
             if (server) { toast('WolffAI на связи'); return; }
+            var report = aiReport();
             confirmBox('WolffAI не найден',
-                'Помощнику нужен сервер с ключом Gemini. Проверьте, что проект развёрнут, ' +
-                'в его настройках задан ключ и сделан Redeploy. Если сайт открыт с одного ' +
-                'адреса, а сервер живёт на другом, адрес можно указать вручную.',
-                'Указать адрес', function () {
-                    promptBox('Адрес помощника',
-                        'Вставьте адрес сервера — подойдёт и корень сайта, и путь к /api/ai',
-                        '', function (val) {
-                            var url = String(val || '').trim().replace(/\/+$/, '');
-                            if (!url) return;
-                            if (!/^https?:\/\//i.test(url)) { toast('Адрес должен начинаться с https://'); return; }
-                            if (!/\/api\/ai$/.test(url)) url = url.replace(/\/api\/db$/, '') + '/api/ai';
-                            localStorage.setItem(LS.aiUrl, url);
-                            updateAiPill(true).then(function (found) {
-                                toast(found ? 'WolffAI на связи' : 'По этому адресу помощник не отвечает');
-                            });
-                        });
-                });
+                'Помощник живёт на вашем сервере — там же, где ключ Gemini. Похоже, ' +
+                'приложение открыто с адреса, где сервера нет.' +
+                (report ? '\n\nПроверили:\n' + report : '') +
+                '\n\nУкажите адрес сервера один раз — заодно заработают уведомления ' +
+                'при закрытом приложении и гифки.',
+                'Указать адрес', askServerAddress);
         });
     }
 
@@ -6077,6 +6213,8 @@
         findPushServer: findPushServer,
         findAiServer: findAiServer,
         serviceUrls: serviceUrls,
+        setServer: setServer,
+        currentServer: currentServer,
         setTheme: setTheme,
         state: state,
         api: api,
