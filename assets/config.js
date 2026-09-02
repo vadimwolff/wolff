@@ -8,8 +8,14 @@
  * ========================================================================== */
 
 window.WM_CONFIG = {
-    /* Публичный anon-ключ Supabase. Он предназначен для клиента и не является
-       секретом; доступ к данным ограничивается политиками RLS в базе. */
+    /* Ключ базы нужен только прямым адресам (последние два в списке). Когда
+       приложение работает через свой сервер (/api/db), ключ не отправляется
+       вовсе: сервер подставляет его сам, и в браузере его нет.
+
+       Чтобы убрать ключ из браузера совсем, смените его в Supabase
+       (Settings → API → rotate anon key), пропишите новый только в настройках
+       Vercel и оставьте здесь пустую строку — тогда останется единственный
+       путь: через свой сервер. */
     apiKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ6Z2l5YWZwa2VxdmJwcW9tYmtyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3NzU5MTksImV4cCI6MjA5NDM1MTkxOX0.qvKNRcO-ylrWzOFYxEvWhcGBeSCxoanZx4i1VnhF7_w",
 
     endpoints: [

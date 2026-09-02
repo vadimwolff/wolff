@@ -32,7 +32,8 @@
         notify: 'WM_NOTIFY',
         notified: 'WM_NOTIFIED',
         recent: 'WM_RECENT',
-        sound: 'WM_SOUND'
+        sound: 'WM_SOUND',
+        online: 'WM_ONLINE'
     };
 
     var THEMES = [
@@ -108,7 +109,9 @@
         hasPreviews: true,
         hasSearch: true,
         hasReplies: true,
-        hasPublicKeys: true
+        hasPublicKeys: true,
+        hasPresence: true,      // есть ли в базе колонки статуса «в сети»
+        presenceTimer: null
     };
 
     /* --------------------------------------------------------------- утилиты */
@@ -251,6 +254,13 @@
        поэтому список сообщений остаётся лёгким. */
     function isPhotoRef(text) { return typeof text === 'string' && text.indexOf('wmimg:') === 0; }
     function isVoiceRef(text) { return typeof text === 'string' && text.indexOf('wmvoice:') === 0; }
+    function isVideoRef(text) { return typeof text === 'string' && text.indexOf('wmvid:') === 0; }
+
+    /* «wmvid:<номер вложения>:<секунд>» */
+    function videoInfo(text) {
+        var parts = String(text).split(':');
+        return { id: parts[1] || '', seconds: Math.max(0, Math.round(Number(parts[2]) || 0)) };
+    }
 
     /* «wmvoice:<номер вложения>:<секунд>» */
     function voiceInfo(text) {
@@ -357,12 +367,19 @@
         });
     }
 
-    function headers(extra) {
-        var h = {
-            'apikey': CFG.apiKey,
-            'Authorization': 'Bearer ' + CFG.apiKey,
-            'Content-Type': 'application/json'
-        };
+    /* Свой сервер (/api/db) подставляет ключ базы сам, поэтому в браузер его
+       отдавать незачем: через прокси запросы уходят вообще без ключа. Ключ
+       нужен только прямым адресам. */
+    function needsKey(url) {
+        return !/\/api\/db\/?$/.test(String(url || ''));
+    }
+
+    function headers(extra, url) {
+        var h = { 'Content-Type': 'application/json' };
+        if (CFG.apiKey && needsKey(url === undefined ? api.base : url)) {
+            h.apikey = CFG.apiKey;
+            h.Authorization = 'Bearer ' + CFG.apiKey;
+        }
         if (extra) Object.keys(extra).forEach(function (k) { h[k] = extra[k]; });
         return h;
     }
@@ -380,7 +397,8 @@
        (например 404 GitHub Pages) отдаёт HTML и проверку не проходит. */
     function probe(url) {
         var started = Date.now();
-        return fetchTimeout(url + '/profiles?select=id&limit=1', { headers: headers(), cache: 'no-store' }, 8000)
+        return fetchTimeout(url + '/profiles?select=id&limit=1',
+            { headers: headers(null, url), cache: 'no-store' }, 8000)
             .then(function (r) {
                 var ct = r.headers.get('content-type') || '';
                 var ok = r.ok || (r.status >= 400 && r.status < 500 && ct.indexOf('json') >= 0);
@@ -516,7 +534,7 @@
 
             return fetchTimeout(url + path, {
                 method: opts.method || 'GET',
-                headers: headers(opts.headers),
+                headers: headers(opts.headers, url),
                 body: opts.body ? JSON.stringify(opts.body) : undefined,
                 cache: 'no-store'
             }, opts.timeout || 15000).then(function (res) {
@@ -719,20 +737,94 @@
         }).catch(function () { return null; });
     }
 
-    function profileCols() {
-        return state.hasPublicKeys ? 'id,nickname,name,avatar,public_key' : 'id,nickname,name,avatar';
+    /* ==================================================================
+       «В СЕТИ»
+
+       Приложение отмечает своё присутствие в профиле раз в минуту, а рядом
+       лежит разрешение показывать это другим. Выключенный переключатель
+       прячет отметку у всех: другие видят просто имя, без времени.
+       ================================================================== */
+
+    var ONLINE_MS = 60000;          // как часто отмечаемся
+    var ONLINE_WINDOW = 90000;      // до этого возраста отметка считается «в сети»
+
+    function showOnline() {
+        return localStorage.getItem(LS.online) !== 'off';
     }
 
-    /* Запрос профилей с откатом: в базе прошлой версии колонки ключа нет,
-       и PostgREST отвечает на неё ошибкой 400. */
+    function touchOnline() {
+        if (!state.me || !state.hasPresence) return Promise.resolve();
+        return request('/profiles?id=eq.' + q(state.me.id), {
+            method: 'PATCH',
+            body: { last_seen: new Date().toISOString(), show_online: showOnline() }
+        }).catch(function (err) {
+            // База прошлой версии — просто живём без статусов.
+            if (err.status === 400 || missingRelation(err)) state.hasPresence = false;
+            return null;
+        });
+    }
+
+    /* Текст статуса собеседника: «в сети», «был(а) в 14:05» или ничего. */
+    function presenceText(profile) {
+        if (!state.hasPresence || !profile) return '';
+        if (profile.show_online === false || !profile.last_seen) return '';
+
+        var seen = new Date(profile.last_seen).getTime();
+        if (!seen) return '';
+        var gap = Date.now() - seen;
+        if (gap < ONLINE_WINDOW) return 'в сети';
+
+        var when = new Date(seen);
+        var today = new Date();
+        var sameDay = when.toDateString() === today.toDateString();
+        if (gap < 3600000) {
+            var mins = Math.max(1, Math.round(gap / 60000));
+            return 'был(а) ' + mins + ' ' + plural(mins, 'минуту', 'минуты', 'минут') + ' назад';
+        }
+        return sameDay ? 'был(а) в ' + fmtTime(profile.last_seen)
+            : 'был(а) ' + fmtDay(profile.last_seen);
+    }
+
+    function updateOnlinePill() {
+        var pill = $('online-state');
+        if (!pill) return;
+        var on = showOnline();
+        pill.textContent = on ? 'вкл' : 'выкл';
+        pill.className = 'pill ' + (on ? 'ok' : '');
+    }
+
+    function toggleOnline() {
+        var on = !showOnline();
+        localStorage.setItem(LS.online, on ? 'on' : 'off');
+        updateOnlinePill();
+        touchOnline();
+        toast(on ? 'Другие видят, когда вы в сети' : 'Статус «в сети» скрыт');
+    }
+
+    function profileCols() {
+        var cols = 'id,nickname,name,avatar';
+        if (state.hasPublicKeys) cols += ',public_key';
+        if (state.hasPresence) cols += ',last_seen,show_online';
+        return cols;
+    }
+
+    /* Запрос профилей с откатом: в базе прошлой версии части колонок нет,
+       и PostgREST отвечает на них ошибкой 400. */
     function fetchProfiles(filter) {
         var base = 'id,nickname,name,avatar';
-        return request('/profiles?' + filter + '&select=' + profileCols())
-            .catch(function (err) {
-                if (err.status !== 400 || !state.hasPublicKeys) throw err;
+        var retry = function (err) {
+            if (err.status !== 400) throw err;
+            if (state.hasPresence) {                 // сначала отказываемся от статусов
+                state.hasPresence = false;
+                return request('/profiles?' + filter + '&select=' + profileCols()).catch(retry);
+            }
+            if (state.hasPublicKeys) {
                 state.hasPublicKeys = false;
                 return request('/profiles?' + filter + '&select=' + base);
-            });
+            }
+            throw err;
+        };
+        return request('/profiles?' + filter + '&select=' + profileCols()).catch(retry);
     }
 
     function publicKeyOf(userId) {
@@ -1359,18 +1451,132 @@
         }).catch(function (e) { toast(e.message || 'Не удалось обновить аватар'); });
     }
 
+    /* Выбранные файлы отправляются по очереди: несколько снимков сразу —
+       это просто несколько сообщений подряд, зато порядок не путается и
+       память не забивается разом всеми картинками. */
     function handlePhotoFile(input) {
-        var file = input.files && input.files[0];
-        input.value = '';
-        if (!file || !state.activeRoom) return;
+        var files = Array.prototype.slice.call((input && input.files) || []);
+        if (input) input.value = '';
+        if (!files.length || !state.activeRoom) return;
 
         var room = state.activeRoom;
-        Promise.all([
+        if (files.length > 1) toast('Отправляем ' + files.length + '…');
+
+        return files.reduce(function (chain, file) {
+            return chain.then(function () {
+                if (state.activeRoom !== room) return null;
+                return /^video\//.test(file.type) ? sendVideoFile(room, file)
+                    : sendPhotoFile(room, file);
+            });
+        }, Promise.resolve());
+    }
+
+    function sendPhotoFile(room, file) {
+        return Promise.all([
             shrinkImage(file, CFG.imageMaxSide, CFG.imageQuality),
             shrinkImage(file, 56, 0.45)          // крошечное превью для мгновенного показа
         ]).then(function (parts) {
             return sendPhoto(room, parts[0], parts[1]);
         }).catch(function (e) { toast(e.message || 'Не удалось отправить фото'); });
+    }
+
+    /* --------------------------------------------------------------- видео
+
+       Ролик хранится вложением целиком, поэтому есть предел по размеру: в
+       базе строка не резиновая, да и по мобильной сети большой файл идёт
+       долго. В сообщении остаётся ссылка на вложение, длительность и кадр
+       для превью — его видно сразу, до загрузки самого ролика. */
+
+    var VIDEO_MAX_BYTES = 12 * 1024 * 1024;
+
+    function videoPoster(file) {
+        return new Promise(function (resolve, reject) {
+            var url = URL.createObjectURL(file);
+            var video = document.createElement('video');
+            video.preload = 'metadata';
+            video.muted = true;
+            video.playsInline = true;
+
+            var done = function (poster, seconds) {
+                URL.revokeObjectURL(url);
+                resolve({ poster: poster, seconds: seconds });
+            };
+
+            video.onloadeddata = function () {
+                var seconds = isFinite(video.duration) ? Math.round(video.duration) : 0;
+                try {
+                    var scale = Math.min(1, 320 / Math.max(video.videoWidth || 320, 1));
+                    var canvas = document.createElement('canvas');
+                    canvas.width = Math.max(1, Math.round((video.videoWidth || 320) * scale));
+                    canvas.height = Math.max(1, Math.round((video.videoHeight || 240) * scale));
+                    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+                    done(canvas.toDataURL('image/jpeg', 0.5), seconds);
+                } catch (e) {
+                    done('', seconds);           // кадр не сняли — обойдёмся без превью
+                }
+            };
+            video.onerror = function () {
+                URL.revokeObjectURL(url);
+                reject(WMError('Не удалось прочитать видео'));
+            };
+            video.src = url;
+        });
+    }
+
+    function readAsDataUrl(file) {
+        return new Promise(function (resolve, reject) {
+            var reader = new FileReader();
+            reader.onload = function () { resolve(String(reader.result)); };
+            reader.onerror = function () { reject(WMError('Не удалось прочитать файл')); };
+            reader.readAsDataURL(file);
+        });
+    }
+
+    function sendVideoFile(room, file) {
+        if (!state.hasAttachments) {
+            toast('Видео требует обновления базы');
+            return Promise.resolve();
+        }
+        if (file.size > VIDEO_MAX_BYTES) {
+            toast('Видео больше ' + Math.round(VIDEO_MAX_BYTES / 1048576) + ' МБ — ' +
+                'снимите покороче или сожмите');
+            return Promise.resolve();
+        }
+
+        toast('Готовим видео…');
+        var info = { poster: '', seconds: 0 };
+
+        return videoPoster(file).catch(function () { return info; }).then(function (res) {
+            info = res || info;
+            return readAsDataUrl(file);
+        }).then(function (dataUrl) {
+            return roomKey(room).then(function (key) {
+                if (!key) return { data: dataUrl, thumb: info.poster };
+                return Promise.all([
+                    CR.encrypt(key, dataUrl),
+                    info.poster ? CR.encrypt(key, info.poster) : Promise.resolve(null)
+                ]).then(function (p) { return { data: p[0], thumb: p[1] }; });
+            }).then(function (payload) {
+                return request('/attachments', {
+                    method: 'POST',
+                    headers: { Prefer: 'return=representation' },
+                    body: { room_id: room, user_id: state.me.id, data: payload.data }
+                }).then(function (rows) {
+                    var id = rows && rows[0] && rows[0].id;
+                    if (!id) throw WMError('Вложение не сохранено');
+                    state.photos[String(id)] = dataUrl;      // своё видео открывается сразу
+                    sendMessage('wmvid:' + id + ':' + (info.seconds || 0),
+                        { thumb: payload.thumb, thumbBody: info.poster });
+                });
+            });
+        }).catch(function (err) {
+            if (missingRelation(err)) {
+                state.hasAttachments = false;
+                toast('Видео требует обновления базы');
+                return;
+            }
+            toast(err.message || 'Не удалось отправить видео');
+        });
     }
 
     /* Полный снимок уходит в отдельную таблицу, в сообщении остаётся ссылка на
@@ -1583,6 +1789,33 @@
             }
             toast(err.message || 'Не удалось отправить голосовое');
         });
+    }
+
+    /* Видео открывается на весь экран поверх переписки. */
+    function openVideo(node) {
+        var id = node.getAttribute('data-video');
+        node.classList.add('loading');
+
+        fetchAttachment(id).then(function (data) {
+            node.classList.remove('loading');
+            var box = $('lightbox');
+            $('lightbox-img').hidden = true;
+            var player = $('lightbox-video');
+            player.hidden = false;
+            player.src = data;
+            box.classList.add('show');
+            player.play().catch(function () { /* автозапуск запретили — есть кнопка */ });
+        }).catch(function () {
+            node.classList.remove('loading');
+            toast('Не удалось открыть видео');
+        });
+    }
+
+    function closeLightbox() {
+        var player = $('lightbox-video');
+        if (player) { player.pause(); player.removeAttribute('src'); player.load(); player.hidden = true; }
+        $('lightbox-img').hidden = false;
+        $('lightbox').classList.remove('show');
     }
 
     /* ----------------------------------------------------- воспроизведение */
@@ -1837,7 +2070,7 @@
                 text: typeof text === 'string' ? text : ''
             };
         }).filter(function (m) {
-            return m.text && !isPhoto(m.text) && !isVoiceRef(m.text) &&
+            return m.text && !isPhoto(m.text) && !isVoiceRef(m.text) && !isVideoRef(m.text) &&
                 !(CR && CR.isEncrypted(m.text));
         });
     }
@@ -1982,8 +2215,10 @@
         }));
     }
 
-    function loadProfiles(ids) {
-        var need = (ids || []).filter(function (id) { return id && !state.profiles[id]; });
+    function loadProfiles(ids, force) {
+        var need = (ids || []).filter(function (id) {
+            return id && (force || !state.profiles[id]);
+        });
         if (!need.length) return Promise.resolve();
 
         return fetchProfiles('id=in.(' + need.map(q).join(',') + ')')
@@ -2245,7 +2480,8 @@
             for (var i = cached.length - 1; i >= 0 && out.length < 30; i--) {
                 var m = cached[i];
                 var text = m && typeof m.text === 'string' ? m.text : '';
-                if (!text || isPhoto(text) || isVoiceRef(text) || (CR && CR.isEncrypted(text))) continue;
+                if (!text || isPhoto(text) || isVoiceRef(text) || isVideoRef(text) ||
+                    (CR && CR.isEncrypted(text))) continue;
                 if (text.toLowerCase().indexOf(needle) < 0) continue;
                 out.push({
                     room_id: chat.room_id,
@@ -2787,7 +3023,7 @@
         } else {
             var other = (chat.members || []).filter(function (m) { return m !== state.me.id; })[0];
             var p = other && state.profiles[other];
-            if (p) sub = '@' + p.nickname;
+            if (p) sub = presenceText(p) || ('@' + p.nickname);
         }
         if (prefFor(chat.room_id).muted) sub += (sub ? ' · ' : '') + '🔇';
         $('chat-subtitle').textContent = sub;
@@ -2914,6 +3150,7 @@
 
     function stopTimers() {
         clearInterval(state.callPoll);
+        clearInterval(state.presenceTimer);
         stopChatTimer();
         if (state.listTimer) { clearInterval(state.listTimer); state.listTimer = null; }
     }
@@ -2923,9 +3160,25 @@
         return real.length ? real[real.length - 1].created_at : null;
     }
 
+    /* Пока личный чат открыт, раз в 15 секунд освежаем профиль собеседника —
+       иначе «в сети» в шапке замерло бы на момент открытия. */
+    function refreshPresence() {
+        var chat = state.activeChat;
+        if (!chat || chat.kind !== 'dm' || !state.hasPresence) return;
+        if (Date.now() - (state.presenceAt || 0) < 15000) return;
+        state.presenceAt = Date.now();
+
+        var other = (chat.members || []).filter(function (m) { return m !== state.me.id; })[0];
+        if (!other) return;
+        loadProfiles([other], true).then(function () {
+            if (state.activeChat === chat) updateChatHeader();
+        });
+    }
+
     function pollChat(initial) {
         var room = state.activeRoom;
         if (!room) return Promise.resolve();
+        refreshPresence();
 
         var base = 'id,room_id,user_id,user_name,text,reactions,created_at';
         var fields = state.hasReplies
@@ -3101,6 +3354,14 @@
                 ' src="' + esc(ready || m.thumbBody || TRANSPARENT_PIXEL) + '"' +
                 ' alt="фото" data-photo="1" data-att="' + esc(id) + '"' +
                 (ready ? ' data-loaded="1"' : '') + '>';
+        } else if (isVideoRef(body)) {
+            var vid = videoInfo(body);
+            var poster = m.thumbBody || '';
+            content = '<div class="video" data-video="' + esc(vid.id) + '">' +
+                (poster ? '<img class="video-poster" src="' + esc(poster) + '" alt="видео">' : '') +
+                '<span class="video-play"></span>' +
+                (vid.seconds ? '<span class="video-time">' + esc(fmtDuration(vid.seconds)) +
+                    '</span>' : '') + '</div>';
         } else if (isVoiceRef(body)) {
             var voice = voiceInfo(body);
             content = '<div class="voice" data-voice="' + esc(voice.id) + '"' +
@@ -3321,7 +3582,8 @@
         renderMessages(true);
 
         var previewText = isPhoto(text) ? '📷 Фото'
-            : (isVoiceRef(text) ? '🎤 Голосовое сообщение' : String(text).slice(0, 70));
+            : (isVoiceRef(text) ? '🎤 Голосовое сообщение'
+                : (isVideoRef(text) ? '🎬 Видео' : String(text).slice(0, 70)));
 
         roomKey(room).then(function (key) {
             if (!key) return { text: text, quote: reply ? reply.preview : null, preview: previewText };
@@ -3386,7 +3648,7 @@
             if (saved && saved.id) pingPush(saved.id);
             if (isAi(findChat(room))) {
                 // Помощник понимает только текст: на фото и голос отвечаем сразу.
-                if (isPhoto(text) || isVoiceRef(text)) {
+                if (isPhoto(text) || isVoiceRef(text) || isVideoRef(text)) {
                     postAiMessage(room, 'Я пока понимаю только текст — напишите словами, ' +
                         'и я отвечу.').then(function () { pollChat(false); });
                 } else {
@@ -3466,7 +3728,12 @@
             else if (act === 'reply') startReply(msg);
             else if (act === 'copy') copyMessage(msg);
             else if (act === 'who') openReactionList(msgId);
-            else if (act === 'delete') deleteMessage(msgId);
+            else if (act === 'delete') {
+                confirmBox('Удалить сообщение?',
+                    'Сообщение исчезнет у всех участников чата.', 'Удалить', function () {
+                    deleteMessage(msgId);
+                });
+            }
         });
 
         bubble.appendChild(menu);
@@ -3572,14 +3839,34 @@
         }
     }
 
-    function gestureUp() {
+    function gestureUp(e) {
         if (!gesture) return;
-        var reply = gesture.swiping && gesture.dx <= -SWIPE_DONE ? findMessage(gesture.id) : null;
+        var swiped = gesture.swiping && gesture.dx <= -SWIPE_DONE;
+        var reply = swiped ? findMessage(gesture.id) : null;
+
+        // Обычное касание открывает то же меню, что и долгое нажатие.
+        var tap = !gesture.swiping && !gesture.opened &&
+            Math.abs((e && e.clientX ? e.clientX : gesture.x) - gesture.x) < 8;
+        var node = gesture.node;
+        var id = gesture.id;
+
         clearGesture(true);
+
         if (reply && !reply.pending && canPost(state.activeChat)) {
             vibrate(12);
             startReply(reply);
+            return;
         }
+        if (tap && node && !tapHitsControl(e)) openPicker(node, id);
+    }
+
+    /* Нажатия на ссылку, фото, голос, реакцию, цитату, имя автора и строку
+       обсуждения обрабатываются по-своему — меню там не нужно. */
+    function tapHitsControl(e) {
+        var el = e && e.target && e.target.closest ? e.target : null;
+        if (!el) return false;
+        return !!el.closest('a.link, .voice, .reaction-badge, .quote, .author, ' +
+            '[data-comments], [data-photo], .msg-menu');
     }
 
     function findMessage(id) {
@@ -3893,8 +4180,10 @@
             $('pf-av').src = (p && p.avatar) || avatarFor(name, userId);
             $('pf-name').textContent = name;
             $('pf-nick').textContent = p && p.nickname ? '@' + p.nickname : '';
-            $('pf-extra').textContent = isMe ? 'Это ваш профиль'
+            var status = isMe ? '' : presenceText(p);
+            var note = isMe ? 'Это ваш профиль'
                 : (p && p.public_key ? 'Переписка с этим человеком шифруется' : '');
+            $('pf-extra').textContent = status ? status + (note ? ' · ' + note : '') : note;
             $('pf-write').hidden = isMe || !p;
             $('pf-write').onclick = function () {
                 modal.classList.remove('show');
@@ -3905,8 +4194,9 @@
         paint(state.profiles[userId] || (isMe ? state.me : null));
         modal.classList.add('show');
 
-        if (!state.profiles[userId] && !isMe) {
-            loadProfiles([userId]).then(function () { paint(state.profiles[userId]); });
+        if (!isMe) {
+            // Обновляем карточку: статус «в сети» должен быть свежим.
+            loadProfiles([userId], true).then(function () { paint(state.profiles[userId]); });
         }
     }
 
@@ -4538,16 +4828,23 @@
        приложение запущено. */
 
     /* Серверные службы (уведомления, помощник) живут рядом с прокси базы —
-       по адресу /api/<имя> — или на домене самого сайта. */
+       по адресу /api/<имя> — или на домене самого сайта.
+
+       Ищем рядом со ВСЕМИ известными адресами, а не только с активным: сайт может
+       лежать на GitHub Pages, а сервер — на другом домене, и активным при этом
+       окажется совсем другой канал связи. */
     function serviceUrls(name) {
         var list = [];
         var add = function (url) { if (url && list.indexOf(url) < 0) list.push(url); };
+        var fromBase = function (base) {
+            if (base && /\/api\/db\/?$/.test(base)) add(base.replace(/\/api\/db\/?$/, '/api/' + name));
+        };
         var custom = name === 'push' ? CFG.pushUrl : CFG.aiUrl;
 
         if (custom) add(String(custom).replace(/\/+$/, ''));
-        if (api.base && /\/api\/db$/.test(api.base)) {
-            add(api.base.replace(/\/api\/db$/, '/api/' + name));
-        }
+        fromBase(api.base);
+        try { fromBase(localStorage.getItem(LS.api)); } catch (e) { /* нет доступа */ }
+        candidates().forEach(function (c) { fromBase(c.url); });
         add(new URL('api/' + name, location.href).href.replace(/\/+$/, ''));
         return list;
     }
@@ -4656,6 +4953,33 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ msg: msgId })
             }, 8000).catch(function () { /* уведомление — не критично */ });
+        });
+    }
+
+    /* Состояние помощника видно в настройках: так сразу понятно, дошло ли
+       приложение до сервера с ключом или ищет его не там. */
+    function updateAiPill(force) {
+        var pill = $('ai-state');
+        if (!pill) return Promise.resolve(null);
+        if (force) { delete state.services.ai; delete state.serviceTasks.ai; }
+
+        pill.textContent = 'проверяем…';
+        pill.className = 'pill';
+        return findAiServer().then(function (server) {
+            pill.textContent = server ? 'подключён' : 'не найден';
+            pill.className = 'pill ' + (server ? 'ok' : 'bad');
+            return server;
+        });
+    }
+
+    function checkAi() {
+        updateAiPill(true).then(function (server) {
+            if (server) { toast('WolffAI на связи'); return; }
+            confirmBox('WolffAI не найден',
+                'Помощнику нужен сервер с ключом Gemini. Проверьте, что проект развёрнут ' +
+                'на Vercel, в его настройках задан GEMINI_API_KEY и сделан Redeploy. ' +
+                'Если сайт открыт не с того же домена, укажите адрес сервера в разделе «Соединение».',
+                'Открыть «Соединение»', openConnection);
         });
     }
 
@@ -4924,6 +5248,11 @@
         ensureAi();
         mirrorPrefs();
         setupCalls();
+        touchOnline();
+        clearInterval(state.presenceTimer);
+        state.presenceTimer = setInterval(function () {
+            if (!document.hidden) touchOnline();
+        }, ONLINE_MS);
         if (notifyEnabled()) enablePush();      // подписка могла устареть
         paintCachedChatList();
         renderChatList();
@@ -4938,7 +5267,12 @@
         $('auth-form').addEventListener('submit', handleAuth);
         $('auth-swap-btn').addEventListener('click', function () { setAuthMode(!state.registerMode); });
 
-        $('btn-settings').addEventListener('click', function () { showPage('settings', true); renderThemes(); });
+        $('btn-settings').addEventListener('click', function () {
+            showPage('settings', true);
+            renderThemes();
+            updateAiPill(false);
+            updateOnlinePill();
+        });
         $('btn-plus').addEventListener('click', openPlus);
         $('chat-search').addEventListener('input', function (e) { openSearch(); runSearch(e.target.value); });
         $('chat-search').addEventListener('focus', openSearch);
@@ -5068,6 +5402,13 @@
                 return;
             }
 
+            var video = e.target.closest('.video');
+            if (video) {
+                e.stopPropagation();
+                openVideo(video);
+                return;
+            }
+
             var voice = e.target.closest('.voice');
             if (voice) {
                 e.stopPropagation();
@@ -5131,7 +5472,10 @@
         });
         $('set-profile').addEventListener('click', function () { openProfile(state.me.id); });
 
-        $('lightbox').addEventListener('click', function () { this.classList.remove('show'); });
+        $('lightbox').addEventListener('click', function (e) {
+            if (e.target && e.target.id === 'lightbox-video') return;   // не мешаем управлять
+            closeLightbox();
+        });
 
         $('btn-settings-done').addEventListener('click', function () { showPage('main'); });
         $('theme-scroll').addEventListener('click', function (e) {
@@ -5164,6 +5508,8 @@
         });
         $('set-notify').addEventListener('click', toggleNotifications);
         $('set-sound').addEventListener('click', toggleSound);
+        $('set-ai').addEventListener('click', checkAi);
+        $('set-online').addEventListener('click', toggleOnline);
         $('set-install').addEventListener('click', openInstall);
         $('install-tabs').addEventListener('click', function (e) {
             var tab = e.target.closest('[data-platform]');
@@ -5290,6 +5636,8 @@
         reconnect: reconnect,
         openConnection: openConnection,
         findPushServer: findPushServer,
+        findAiServer: findAiServer,
+        serviceUrls: serviceUrls,
         state: state,
         api: api,
         rpc: rpc

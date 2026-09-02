@@ -135,7 +135,7 @@
 
     <div class="input-bar" id="input-bar">
         <button type="button" id="btn-attach" title="Прикрепить фото">📎</button>
-        <input type="file" id="m-file" accept="image/*" hidden>
+        <input type="file" id="m-file" accept="image/*,video/*" multiple hidden>
         <textarea id="m-input" rows="1" placeholder="Сообщение..."></textarea>
         <button type="button" id="btn-send" class="send" title="Отправить">➤</button>
         <button type="button" id="btn-mic" class="send mic" title="Голосовое сообщение" hidden>🎤</button>
@@ -185,6 +185,8 @@
             <div class="settings-item" id="set-conn"><i>🌐</i> Соединение <span id="conn-state" class="pill">…</span></div>
             <div class="settings-item" id="set-notify"><i>🔔</i> Уведомления <span id="notify-state" class="pill">выкл</span></div>
             <div class="settings-item" id="set-sound"><i>🔉</i> Звук новых сообщений <span id="sound-state" class="pill">вкл</span></div>
+            <div class="settings-item" id="set-online"><i>👁</i> Показывать, что я в сети <span id="online-state" class="pill">вкл</span></div>
+            <div class="settings-item" id="set-ai"><i>✨</i> Помощник WolffAI <span id="ai-state" class="pill">…</span></div>
             <div class="settings-item" id="set-install"><i>📲</i> Установить приложение</div>
             <div class="settings-item" id="set-motion"><i>✨</i> Анимации <span id="motion-state" class="pill">вкл</span></div>
             <div class="settings-item" id="set-profile"><i>🪪</i> Мой профиль</div>
@@ -346,7 +348,10 @@
     <audio id="call-audio" autoplay></audio>
 </div>
 
-<div id="lightbox" class="lightbox"><img id="lightbox-img" alt=""></div>
+<div id="lightbox" class="lightbox">
+    <img id="lightbox-img" alt="">
+    <video id="lightbox-video" controls playsinline hidden></video>
+</div>
 
 <script src="assets/config.js"></script>
 <script src="assets/crypto.js"></script>

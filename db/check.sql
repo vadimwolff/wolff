@@ -23,6 +23,7 @@ with expected(kind, name, hint) as (
         ('колонка',  'chats.subscribers', 'число подписчиков'),
         ('колонка',  'messages.preview',  'подпись для списка чатов'),
         ('колонка',  'messages.reply_to', 'ответы на сообщения'),
+        ('колонка',  'profiles.last_seen',       'статус «в сети»'),
         ('колонка',  'profiles.public_key',      'открытый ключ шифрования'),
         ('колонка',  'profiles.enc_private_key', 'закрытый ключ (зашифрован)'),
         ('функция',  'wm_register',       'регистрация'),

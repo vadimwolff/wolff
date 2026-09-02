@@ -186,6 +186,8 @@ await step('удаление своего сообщения', async () => {
     await alice.page.locator('.bubble.out').last().click({ button: 'right' });
     await alice.page.waitForSelector('.msg-menu .menu-item[data-act="delete"]');
     await alice.page.click('.msg-menu .menu-item[data-act="delete"]');
+    await alice.page.waitForSelector('#confirm-modal.show', { timeout: 10000 });
+    await alice.page.click('#confirm-ok');
     await alice.page.waitForFunction(
         (n) => document.querySelectorAll('.bubble.out').length === n - 1, before, { timeout: 15000 });
 });

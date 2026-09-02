@@ -45,6 +45,12 @@ alter table public.profiles add column if not exists password      text;
 alter table public.profiles add column if not exists password_hash text;
 alter table public.profiles add column if not exists created_at    timestamptz default now();
 
+-- «в сети»: отметка последнего появления и разрешение показывать её другим
+alter table public.profiles add column if not exists last_seen  timestamptz;
+alter table public.profiles add column if not exists show_online boolean default true;
+
+update public.profiles set show_online = true where show_online is null;
+
 -- ключи сквозного шифрования: открытый ключ виден всем, закрытый хранится
 -- только в зашифрованном виде и расшифровывается паролем на устройстве
 alter table public.profiles add column if not exists public_key      text;
@@ -815,8 +821,8 @@ begin
         execute 'revoke all on public.profiles from anon, authenticated';
         -- открытый ключ читают все, зашифрованный закрытый — никто:
         -- он выдаётся только функцией входа своему владельцу
-        execute 'grant select (id, nickname, name, avatar, created_at, public_key) on public.profiles to anon, authenticated';
-        execute 'grant update (name, avatar) on public.profiles to anon, authenticated';
+        execute 'grant select (id, nickname, name, avatar, created_at, public_key, last_seen, show_online) on public.profiles to anon, authenticated';
+        execute 'grant update (name, avatar, last_seen, show_online) on public.profiles to anon, authenticated';
         execute 'grant delete on public.profiles to anon, authenticated';
         raise notice 'Прямой доступ к паролям закрыт, вход работает через функции.';
     else

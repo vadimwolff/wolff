@@ -677,6 +677,65 @@ body.searching #page-main .search-row { padding-top: calc(var(--safe-top) + 10px
     margin: 2px 0;
 }
 
+/* -------------------------------- видео -------------------------------- */
+
+.video {
+    position: relative;
+    width: 240px;
+    max-width: 100%;
+    min-height: 60px;
+    border-radius: 12px;
+    overflow: hidden;
+    background: rgba(0, 0, 0, 0.35);
+    cursor: pointer;
+    display: block;
+}
+
+.video-poster { display: block; width: 100%; border-radius: 12px; }
+
+.video-play {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(4px);
+}
+
+.video-play::before {
+    content: '';
+    position: absolute;
+    left: 18px;
+    top: 50%;
+    transform: translateY(-50%);
+    border-left: 15px solid #fff;
+    border-top: 9px solid transparent;
+    border-bottom: 9px solid transparent;
+}
+
+.video-time {
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+    background: rgba(0, 0, 0, 0.6);
+    color: #fff;
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 8px;
+}
+
+.video.loading { opacity: 0.6; }
+
+#lightbox-video {
+    max-width: 96vw;
+    max-height: 86vh;
+    border-radius: 12px;
+    outline: none;
+}
+
 /* -------------------------------- голосовое сообщение -------------------------------- */
 
 .voice {
