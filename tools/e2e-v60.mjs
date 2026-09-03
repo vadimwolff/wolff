@@ -119,6 +119,71 @@ await step('помощник отвечает в своём чате', async () 
     assert(answer.includes('Проверка связи'), 'ответ помощника: ' + answer);
 });
 
+/* --------------------------------------------------------------- гифки */
+
+await step('гифка с телефона уходит живой, а не картинкой', async () => {
+    const gif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+    await page.setInputFiles('#m-file', { name: 'wolf.gif', mimeType: 'image/gif', buffer: gif });
+    await page.waitForSelector('.bubble.out .gif-box', { timeout: 30000 });
+
+    const room = await page.evaluate(() => window.WM.state.activeRoom);
+    const rows = await page.evaluate(async (r) => {
+        const res = await fetch(window.WM.api.base + '/attachments?room_id=eq.' +
+            encodeURIComponent(r) + '&select=data&order=id.desc&limit=1');
+        return res.json();
+    }, room);
+    assert(rows.length && String(rows[0].data).indexOf('wm1:') === 0,
+        'гифка с телефона ушла незашифрованной');
+
+    const msgs = await page.evaluate(() => window.WM.state.msgs
+        .map((m) => String(m.body === undefined ? m.text : m.body)));
+    assert(msgs.some((t) => /^wmgif:/.test(t)),
+        'гифка ушла обычной картинкой: ' + msgs.slice(-2).join(' | '));
+});
+
+await step('помощник не пытается разглядывать гифку', async () => {
+    await page.waitForFunction(() => [...document.querySelectorAll('.bubble.in .text')]
+        .some((e) => e.textContent.includes('понимаю только текст')), null, { timeout: 30000 });
+});
+
+await step('в настройках видно, почему поиск гифок не работает', async () => {
+    await page.route('**/api/gif*', (route) => {
+        if (route.request().url().includes('file=')) return route.continue();
+        return route.fulfill({
+            status: 200,
+            contentType: 'application/json; charset=utf-8',
+            body: JSON.stringify({ ok: false, error: 'bad_key', detail: 'ключ не принят (403): forbidden' })
+        });
+    });
+
+    await page.click('#btn-back');
+    await page.waitForSelector('#page-main.active', { timeout: 15000 });
+    await page.click('#btn-settings');
+    await page.waitForSelector('#page-settings.active', { timeout: 15000 });
+    await page.click('#set-gif');
+
+    await page.waitForSelector('#confirm-modal.show', { timeout: 25000 });
+    const text = await page.textContent('#confirm-text');
+    assert(/ключ не принят/.test(text), 'причина не показана: ' + text);
+    assert(/\.gif/.test(text), 'нет подсказки про гифки с телефона: ' + text);
+
+    const pill = await page.textContent('#gif-state');
+    assert(pill === 'не настроен', 'состояние поиска: ' + pill);
+
+    await page.click('#confirm-cancel');
+    await page.unroute('**/api/gif*');
+});
+
+await step('поиск гифок снова работает после починки', async () => {
+    await page.click('#set-gif');
+    await page.waitForFunction(() => {
+        const pill = document.getElementById('gif-state');
+        return pill && pill.textContent === 'работает';
+    }, null, { timeout: 25000 });
+    await page.click('#btn-settings-done');
+    await page.waitForSelector('#page-main.active', { timeout: 15000 });
+});
+
 await step('адрес запомнен: после перезапуска искать заново не нужно', async () => {
     await page.reload();
     await page.waitForSelector('#page-main.active', { timeout: 25000 });

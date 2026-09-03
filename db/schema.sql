@@ -281,6 +281,18 @@ select distinct on (m.room_id)
 from public.messages m
 order by m.room_id, m.created_at desc;
 
+-- Представление обязано проверять права того, кто спрашивает, а не того, кто
+-- его создал. Без этого оно смотрит на таблицу сообщений от имени владельца
+-- базы и обходит её политики доступа — Supabase справедливо ругается на это
+-- («Security Definer View»). Свойство появилось в PostgreSQL 15, поэтому на
+-- более старых базах строка просто пропускается.
+do $$
+begin
+    if current_setting('server_version_num')::int >= 150000 then
+        execute 'alter view public.chat_previews set (security_invoker = on)';
+    end if;
+end $$;
+
 -- ============================================================================
 --  Удаление прежних версий функций.
 --

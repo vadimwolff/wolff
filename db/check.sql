@@ -88,3 +88,23 @@ join pg_namespace n on n.oid = p.pronamespace
 where n.nspname = 'public' and p.proname like 'wm\_%'
 group by p.proname
 order by count(*) desc, p.proname;
+
+-- ----------------------------------------------------------------------------
+--  Права представления chat_previews.
+--
+--  Представление должно спрашивать таблицу сообщений от имени того, кто к нему
+--  обратился (security_invoker), иначе оно обходит политики доступа — на это
+--  ругается проверка безопасности Supabase («Security Definer View»).
+--  Лечится повторным запуском db/schema.sql.
+-- ----------------------------------------------------------------------------
+
+select
+    c.relname                                  as "представление",
+    coalesce(array_to_string(c.reloptions, ', '), '—') as "свойства",
+    case when 'security_invoker=on' = any (coalesce(c.reloptions, '{}'))
+         then 'в порядке'
+         else 'НЕТ — выполните schema.sql заново' end as "состояние"
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where n.nspname = 'public' and c.relkind = 'v'
+order by c.relname;

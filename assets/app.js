@@ -108,6 +108,7 @@
         services: {},           // имя службы -> адрес, null — службы нет
         serviceTasks: {},
         serviceTried: {},       // что перебрали при поиске — видно в настройках
+        gifInfo: null,          // что ответил сервер про поиск гифок
         aiBusy: false,
         firstChatPaint: true,
         serverChats: true,
@@ -1514,8 +1515,9 @@
         return files.reduce(function (chain, file) {
             return chain.then(function () {
                 if (state.activeRoom !== room) return null;
-                return /^video\//.test(file.type) ? sendVideoFile(room, file)
-                    : sendPhotoFile(room, file);
+                if (/^video\//.test(file.type)) return sendVideoFile(room, file);
+                if (file.type === 'image/gif') return sendGifFile(room, file);
+                return sendPhotoFile(room, file);
             });
         }, Promise.resolve());
     }
@@ -2050,6 +2052,9 @@
 
     function findGifServer() {
         return findService('gif', function (info, url) {
+            // Причину отказа запоминаем: её показывают в настройках.
+            if (!info.ok) state.gifInfo = { error: info.error || '', detail: info.detail || '' };
+            else state.gifInfo = { error: '', detail: '', provider: info.provider || '' };
             return info.ok ? { url: url, results: info.results || [] } : null;
         });
     }
@@ -2133,23 +2138,59 @@
             if (blob.size > 8 * 1024 * 1024) throw WMError('Гифка слишком большая');
             return readAsDataUrl(blob);
         }).then(function (dataUrl) {
-            return roomKey(room).then(function (key) {
-                return key ? CR.encrypt(key, dataUrl) : dataUrl;
-            }).then(function (payload) {
-                return request('/attachments', {
-                    method: 'POST',
-                    headers: { Prefer: 'return=representation' },
-                    body: { room_id: room, user_id: state.me.id, data: payload }
-                }).then(function (rows) {
-                    var id = rows && rows[0] && rows[0].id;
-                    if (!id) throw WMError('Вложение не сохранено');
-                    state.photos[String(id)] = dataUrl;
-                    sendMessage('wmgif:' + id + ':' + (width || 200) + ':' + (height || 200));
-                });
+            return postGif(room, dataUrl, width, height);
+        }).catch(function (err) {
+            if (missingRelation(err)) { state.hasAttachments = false; }
+            toast(err.message || 'Не удалось отправить гифку');
+        });
+    }
+
+    /* Гифка уходит зашифрованным вложением — так же, как фотография. */
+    function postGif(room, dataUrl, width, height) {
+        return roomKey(room).then(function (key) {
+            return key ? CR.encrypt(key, dataUrl) : dataUrl;
+        }).then(function (payload) {
+            return request('/attachments', {
+                method: 'POST',
+                headers: { Prefer: 'return=representation' },
+                body: { room_id: room, user_id: state.me.id, data: payload }
+            });
+        }).then(function (rows) {
+            var id = rows && rows[0] && rows[0].id;
+            if (!id) throw WMError('Вложение не сохранено');
+            state.photos[String(id)] = dataUrl;
+            sendMessage('wmgif:' + id + ':' + (width || 200) + ':' + (height || 200));
+        });
+    }
+
+    /* Гифка, выбранная на телефоне, отправляется как есть — иначе она
+       превратилась бы в неподвижную картинку. Поиск для этого не нужен:
+       работает и без ключа сервиса гифок. */
+    var GIF_MAX_BYTES = 8 * 1024 * 1024;
+
+    function sendGifFile(room, file) {
+        if (!state.hasAttachments) return sendPhotoFile(room, file);
+        if (file.size > GIF_MAX_BYTES) {
+            return sendPhotoFile(room, file);      // слишком тяжёлая — уходит снимком
+        }
+        return readAsDataUrl(file).then(function (dataUrl) {
+            return imageSize(dataUrl).then(function (size) {
+                return postGif(room, dataUrl, size.width, size.height);
             });
         }).catch(function (err) {
             if (missingRelation(err)) { state.hasAttachments = false; }
             toast(err.message || 'Не удалось отправить гифку');
+        });
+    }
+
+    function imageSize(dataUrl) {
+        return new Promise(function (resolve) {
+            var img = new Image();
+            img.onload = function () {
+                resolve({ width: img.naturalWidth || 200, height: img.naturalHeight || 200 });
+            };
+            img.onerror = function () { resolve({ width: 200, height: 200 }); };
+            img.src = dataUrl;
         });
     }
 
@@ -2380,7 +2421,7 @@
             };
         }).filter(function (m) {
             return m.text && !isPhoto(m.text) && !isVoiceRef(m.text) && !isVideoRef(m.text) &&
-                !(CR && CR.isEncrypted(m.text));
+                !isGifRef(m.text) && !isCallLog(m.text) && !(CR && CR.isEncrypted(m.text));
         });
     }
 
@@ -3990,8 +4031,9 @@
             if (!isAi(findChat(room)) && /@wolffai\b/i.test(String(text))) askAi(room);
 
             if (isAi(findChat(room))) {
-                // Помощник понимает только текст: на фото и голос отвечаем сразу.
-                if (isPhoto(text) || isVoiceRef(text) || isVideoRef(text)) {
+                // Помощник понимает только текст: на фото, голос и гифки
+                // отвечаем сразу, не тревожа сервер.
+                if (isPhoto(text) || isVoiceRef(text) || isVideoRef(text) || isGifRef(text)) {
                     postAiMessage(room, 'Я пока понимаю только текст — напишите словами, ' +
                         'и я отвечу.').then(function () { pollChat(false); });
                 } else {
@@ -5500,8 +5542,10 @@
     }
 
     /* Короткий отчёт о поиске: какие адреса проверили и что там оказалось. */
-    function aiReport() {
-        var tried = state.serviceTried.ai || [];
+    function aiReport() { return triedReport('ai'); }
+
+    function triedReport(name) {
+        var tried = state.serviceTried[name] || [];
         if (!tried.length) return '';
         return tried.slice(0, 4).map(function (t) {
             var host = t.url;
@@ -5538,6 +5582,53 @@
                 '\n\nУкажите адрес сервера один раз — заодно заработают уведомления ' +
                 'при закрытом приложении и гифки.',
                 'Указать адрес', askServerAddress);
+        });
+    }
+
+    /* Состояние поиска гифок — рядом с состоянием помощника. Гифки со своего
+       телефона отправляются и без поиска, поэтому это именно «поиск». */
+    function updateGifPill(force) {
+        var pill = $('gif-state');
+        if (!pill) return Promise.resolve(null);
+        if (force) { delete state.services.gif; delete state.serviceTasks.gif; }
+
+        pill.textContent = 'проверяем…';
+        pill.className = 'pill';
+        return findGifServer().then(function (server) {
+            pill.textContent = server ? 'работает' : 'не настроен';
+            pill.className = 'pill ' + (server ? 'ok' : 'bad');
+            $('btn-gif').hidden = !server;
+            return server;
+        });
+    }
+
+    function gifReason() {
+        var info = state.gifInfo || {};
+        if (info.error === 'not_configured') return 'ключ сервиса гифок не задан на сервере';
+        if (info.error === 'bad_key') return 'сервис не принял ключ' + (info.detail ? ': ' + info.detail : '');
+        if (info.error) return info.detail || 'сервис гифок не отвечает';
+        return '';
+    }
+
+    function checkGifs() {
+        updateGifPill(true).then(function (server) {
+            if (server) { toast('Поиск гифок работает'); return; }
+            var reason = gifReason();
+            var report = reason ? '' : triedReport('gif');
+            confirmBox('Поиск гифок не настроен',
+                'Гифки со своего телефона отправляются и так: 📎 → выбрать файл .gif — ' +
+                'он уйдёт живым, а не картинкой.' +
+                (reason ? '\n\nПричина: ' + reason : '') +
+                (report ? '\n\nПроверили:\n' + report : '') +
+                '\n\nЧтобы работал поиск, добавьте на сервер ключ GIPHY_API_KEY ' +
+                '(developers.giphy.com — выдаётся сразу) и сделайте Redeploy. ' +
+                'Ключ Tenor тоже подойдёт, но для него в Google Cloud нужно ' +
+                'отдельно включить Tenor API.',
+                'Проверить снова', function () {
+                    updateGifPill(true).then(function (found) {
+                        toast(found ? 'Поиск гифок работает' : 'Пока не отвечает');
+                    });
+                });
         });
     }
 
@@ -5837,6 +5928,7 @@
             showPage('settings', true);
             renderThemes();
             updateAiPill(false);
+            updateGifPill(false);
             updateOnlinePill();
         });
         $('btn-plus').addEventListener('click', openPlus);
@@ -6084,6 +6176,7 @@
         $('set-notify').addEventListener('click', toggleNotifications);
         $('set-sound').addEventListener('click', toggleSound);
         $('set-ai').addEventListener('click', checkAi);
+        $('set-gif').addEventListener('click', checkGifs);
         $('set-online').addEventListener('click', toggleOnline);
         $('set-install').addEventListener('click', openInstall);
         $('install-tabs').addEventListener('click', function (e) {
