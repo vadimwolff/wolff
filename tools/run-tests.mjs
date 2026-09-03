@@ -59,6 +59,7 @@ code += await run('tools/e2e-v57.mjs', {
 });
 code += await run('tools/e2e-v58.mjs', { WM_BASE: 'http://localhost:8123' });
 code += await run('tools/e2e-v59.mjs', { WM_BASE: 'http://localhost:8123' });
+code += await run('tools/e2e-v61.mjs', { WM_BASE: 'http://localhost:8123' });
 code += await run('tools/e2e-v60.mjs', {
     WM_BASE_TLS: 'https://localhost:8443',
     WM_BASE_SITE: 'http://localhost:8129'

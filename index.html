@@ -157,6 +157,7 @@
         <button type="button" id="btn-attach" title="Прикрепить фото">📎</button>
         <button type="button" id="btn-gif" class="gif-btn" title="Гифки">GIF</button>
         <input type="file" id="m-file" accept="image/*,video/*" multiple hidden>
+        <input type="file" id="m-gif-file" accept="image/gif" hidden>
         <textarea id="m-input" rows="1" placeholder="Сообщение..."></textarea>
         <button type="button" id="btn-send" class="send" title="Отправить">➤</button>
         <button type="button" id="btn-mic" class="send mic" title="Голосовое сообщение" hidden>🎤</button>
@@ -222,6 +223,15 @@
 </div>
 
 <!-- ================= МОДАЛКИ ================= -->
+<div id="attach-menu" class="modal-overlay">
+    <div class="modal-menu">
+        <div class="modal-item" id="attach-photo">📷 Фото или видео</div>
+        <div class="modal-item" id="attach-gif"><b class="gif-tag">GIF</b> Найти гифку</div>
+        <div class="modal-item" id="attach-file">📁 Гифка из галереи</div>
+        <div class="modal-item cancel" id="attach-cancel">Отмена</div>
+    </div>
+</div>
+
 <div id="plus-menu" class="modal-overlay">
     <div class="modal-menu">
         <div class="modal-item" id="plus-saved">🔖 Избранное</div>

@@ -112,6 +112,7 @@
         gifTab: 'search',       // какая вкладка панели гифок открыта
         swallowTap: false,      // это касание уже закрыло панель гифок
         gifHeld: false,         // на гифке было долгое нажатие, а не выбор
+        gifScrollTimer: null,
         aiBusy: false,
         firstChatPaint: true,
         serverChats: true,
@@ -2206,6 +2207,52 @@
         grid.addEventListener('scroll', cancel);
     }
 
+    /* Панель закрывается смахиванием вниз — за полоску сверху или за саму
+       панель, когда сетка гифок пролистана в начало. */
+    function bindGifSwipe() {
+        var panel = $('gif-panel');
+        var drag = null;
+
+        panel.addEventListener('pointerdown', function (e) {
+            if (e.target.closest('input, .gif-item, .gif-close')) return;
+            if (e.target.closest('#gif-grid') && $('gif-grid').scrollTop > 4) return;
+            drag = { y: e.clientY, dy: 0 };
+        });
+
+        panel.addEventListener('pointermove', function (e) {
+            if (!drag) return;
+            drag.dy = e.clientY - drag.y;
+            if (drag.dy <= 0) { panel.style.transform = ''; return; }
+            panel.style.transition = 'none';
+            panel.style.transform = 'translateY(' + Math.round(drag.dy) + 'px)';
+        });
+
+        var release = function () {
+            if (!drag) return;
+            var dy = drag.dy;
+            drag = null;
+            panel.style.transition = '';
+            panel.style.transform = '';
+            if (dy > 70) dismissGifs();
+        };
+
+        panel.addEventListener('pointerup', release);
+        panel.addEventListener('pointercancel', release);
+        panel.addEventListener('pointerleave', release);
+    }
+
+    /* Уходит вниз — так же, как её смахнули. */
+    function dismissGifs() {
+        var panel = $('gif-panel');
+        panel.style.transition = 'transform 0.18s ease-in';
+        panel.style.transform = 'translateY(110%)';
+        setTimeout(function () {
+            panel.style.transition = '';
+            panel.style.transform = '';
+            closeGifs();
+        }, 170);
+    }
+
     /* --------------------------------------------------------- панель */
 
     function setupGifs() {
@@ -2325,8 +2372,35 @@
         });
     }
 
-    /* Гифка уходит зашифрованным вложением — так же, как фотография. */
+    /* Гифка уходит зашифрованным вложением — так же, как фотография.
+
+       Показываем её в переписке сразу, ещё до отправки: картинка уже есть на
+       устройстве, ждать сервер незачем. Пока идёт загрузка, пузырь бледный —
+       как у обычного отправляемого сообщения. */
     function postGif(room, dataUrl, width, height) {
+        var localId = 'local' + Date.now() + Math.floor(Math.random() * 1000);
+        state.photos[localId] = dataUrl;
+
+        var shown = 'wmgif:' + localId + ':' + (width || 200) + ':' + (height || 200);
+        var temp = {
+            id: 'tmp_' + localId,
+            localKey: 'local_' + localId,
+            room_id: room,
+            user_id: state.me.id,
+            user_name: state.me.name,
+            text: shown,
+            body: shown,
+            reactions: {},
+            created_at: new Date().toISOString(),
+            pending: true
+        };
+        state.msgs.push(temp);
+        if (state.activeRoom === room) renderMessages(true);
+
+        var drop = function () {
+            state.msgs = state.msgs.filter(function (m) { return m !== temp; });
+        };
+
         return roomKey(room).then(function (key) {
             return key ? CR.encrypt(key, dataUrl) : dataUrl;
         }).then(function (payload) {
@@ -2340,7 +2414,13 @@
             if (!id) throw WMError('Вложение не сохранено');
             state.photos[String(id)] = dataUrl;
             rememberGif(dataUrl, width, height);
+            drop();
             sendMessage('wmgif:' + id + ':' + (width || 200) + ':' + (height || 200));
+        }).catch(function (err) {
+            temp.pending = false;
+            temp.failed = true;
+            if (state.activeRoom === room) renderMessages(false);
+            throw err;
         });
     }
 
@@ -2353,6 +2433,10 @@
         if (!state.hasAttachments) return sendPhotoFile(room, file);
         if (file.size > GIF_MAX_BYTES) {
             return sendPhotoFile(room, file);      // слишком тяжёлая — уходит снимком
+        }
+        // Тяжёлая гифка честно предупреждает: по мобильной сети это не мгновенно.
+        if (file.size > 3 * 1024 * 1024) {
+            toast('Гифка большая (' + Math.round(file.size / 1048576) + ' МБ) — отправка займёт время');
         }
         return readAsDataUrl(file).then(function (dataUrl) {
             return imageSize(dataUrl).then(function (size) {
@@ -2380,15 +2464,21 @@
     function hydrateGifs() {
         var box = $('msg-list');
         if (!box) return;
-        var nodes = box.querySelectorAll('.gif-box[data-gif]:not([data-loaded])');
-        var top = box.scrollTop - 500;
-        var bottom = box.scrollTop + box.clientHeight + 500;
-        var started = 0;
 
+        var nodes = box.querySelectorAll('.gif-box[data-gif]:not([data-loaded])');
+        var view = box.getBoundingClientRect();
+        var near = [];
+
+        // Считаем по настоящему положению на экране: offsetTop у гифки
+        // отсчитывается от пузыря, а не от списка, и раньше проверка врала —
+        // в длинной переписке гифки не загружались вовсе.
         Array.prototype.forEach.call(nodes, function (node) {
-            if (started >= 6) return;
-            if (node.offsetTop < top || node.offsetTop > bottom) return;
-            started++;
+            var rect = node.getBoundingClientRect();
+            if (rect.bottom < view.top - 700 || rect.top > view.bottom + 700) return;
+            near.push(node);
+        });
+
+        near.reverse().slice(0, 6).forEach(function (node) {
             node.setAttribute('data-loaded', '1');
             fetchAttachment(node.getAttribute('data-gif')).then(function (data) {
                 node.innerHTML = '';
@@ -4904,6 +4994,7 @@
     }
 
     function openPlus() { $('plus-menu').classList.add('show'); }
+    function closeAttachMenu() { $('attach-menu').classList.remove('show'); }
     function closePlus() { $('plus-menu').classList.remove('show'); }
 
     /* Закрывает верхнее открытое окно; возвращает true, если было что закрывать. */
@@ -6283,9 +6374,29 @@
         $('btn-join').addEventListener('click', function () { joinChannel(state.activeRoom); });
 
         $('btn-send').addEventListener('click', function () { sendMessage(); });
-        $('btn-attach').addEventListener('click', function () { $('m-file').click(); });
+        // Скрепка открывает выбор: снимок, гифка из поиска или гифка с телефона.
+        $('btn-attach').addEventListener('click', function () {
+            $('attach-menu').classList.add('show');
+        });
+        $('attach-cancel').addEventListener('click', closeAttachMenu);
+        $('attach-menu').addEventListener('click', function (e) {
+            if (e.target === this) closeAttachMenu();
+        });
+        $('attach-photo').addEventListener('click', function () {
+            closeAttachMenu();
+            $('m-file').click();
+        });
+        $('attach-gif').addEventListener('click', function () {
+            closeAttachMenu();
+            if ($('gif-panel').hidden) openGifs();
+        });
+        $('attach-file').addEventListener('click', function () {
+            closeAttachMenu();
+            $('m-gif-file').click();
+        });
+        $('m-gif-file').addEventListener('change', function () { handlePhotoFile(this); });
         $('btn-gif').addEventListener('click', openGifs);
-        $('gif-close').addEventListener('click', closeGifs);
+        $('gif-close').addEventListener('click', dismissGifs);
         $('gif-search').addEventListener('input', function () {
             // Начали набирать — панель сама показывает найденное.
             if (state.gifTab !== 'search') setGifTab('search');
@@ -6308,6 +6419,7 @@
             else sendGif(item.getAttribute('data-gif-url'), w, h);
         });
         bindGifHold();
+        bindGifSwipe();
         $('m-file').addEventListener('change', function () { handlePhotoFile(this); });
         $('m-input').addEventListener('input', function () { autoGrow(this); updateComposer(); });
         bindVoiceButton();
@@ -6374,7 +6486,12 @@
 
         bindMessageGestures();
 
-        $('msg-list').addEventListener('scroll', updateScrollPill, { passive: true });
+        $('msg-list').addEventListener('scroll', function () {
+            updateScrollPill();
+            // Долистали до гифки — она подгружается.
+            clearTimeout(state.gifScrollTimer);
+            state.gifScrollTimer = setTimeout(hydrateGifs, 120);
+        }, { passive: true });
         $('scroll-pill').addEventListener('click', jumpToBottom);
         $('reply-cancel').addEventListener('click', clearReply);
         $('chat-head').addEventListener('click', openChatInfo);
