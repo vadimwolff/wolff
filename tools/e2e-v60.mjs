@@ -165,19 +165,49 @@ await step('своя гифка попадает в «Мои» и уходит �
     assert(closed, 'панель гифок осталась открытой');
 });
 
-await step('своя гифка убирается крестиком', async () => {
+await step('долгое нажатие убирает гифку из своих', async () => {
     await page.click('#btn-gif');
     await page.waitForSelector('#gif-panel:not([hidden])', { timeout: 10000 });
     await page.click('#gif-tabs [data-gtab="mine"]');
     await page.waitForSelector('#gif-grid .gif-item[data-mine]', { timeout: 15000 });
 
-    await page.click('#gif-grid .gif-item[data-mine] .gif-del');
+    const box = await page.locator('#gif-grid .gif-item[data-mine]').first().boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.waitForSelector('#confirm-modal.show', { timeout: 10000 });
+    await page.mouse.up();
+
+    const ask = await page.textContent('#confirm-text');
+    assert(/переписке/.test(ask), 'непонятный вопрос: ' + ask);
+    await page.click('#confirm-ok');
+
     await page.waitForFunction(
         () => !document.querySelector('#gif-grid .gif-item[data-mine]'), null, { timeout: 15000 });
-
     const note = await page.textContent('#gif-note');
     assert(/отправляли/.test(note), 'нет подсказки о своих гифках: ' + note);
     await page.click('#gif-close');
+});
+
+await step('гифка в переписке видна целиком и во всю ширину пузыря', async () => {
+    const box = await page.evaluate(() => {
+        const node = document.querySelector('.bubble.out .gif-box');
+        const img = node && node.querySelector('img, video');
+        const bubble = node && node.closest('.bubble');
+        const rect = node ? node.getBoundingClientRect() : null;
+        return {
+            tag: img ? img.tagName : '',
+            width: rect ? rect.width : 0,
+            height: rect ? rect.height : 0,
+            media: bubble ? bubble.classList.contains('media') : false,
+            padding: bubble ? getComputedStyle(bubble).paddingLeft : ''
+        };
+    });
+
+    assert(box.tag === 'IMG', 'гифка-картинка показана не картинкой: ' + box.tag);
+    assert(box.width > 200, 'гифка вышла крошечной: ' + box.width);
+    assert(box.height > 100, 'высота гифки: ' + box.height);
+    assert(box.media, 'у пузыря с гифкой нет своего оформления');
+    assert(box.padding === '0px', 'вокруг гифки осталась рамка: ' + box.padding);
 });
 
 await step('в настройках видно, почему поиск гифок не работает', async () => {

@@ -152,9 +152,14 @@ await step('гифка уходит зашифрованным вложение�
     const closed = await yura.page.evaluate(() => document.getElementById('gif-panel').hidden);
     assert(closed, 'панель гифок осталась открытой');
 
-    const ratio = await yura.page.evaluate(
-        () => getComputedStyle(document.querySelector('.bubble.out .gif-box')).aspectRatio);
-    assert(ratio && ratio !== 'auto', 'место под гифку не зарезервировано: ' + ratio);
+    // Место под гифку занято ещё до загрузки: у пузыря сразу есть размер,
+    // и переписка не дёргается, когда гифка подгрузится.
+    const box = await yura.page.evaluate(() => {
+        const node = document.querySelector('.bubble.out .gif-box');
+        const rect = node.getBoundingClientRect();
+        return { w: rect.width, h: rect.height };
+    });
+    assert(box.w > 120 && box.h > 60, 'место под гифку не зарезервировано: ' + JSON.stringify(box));
 
     const room = await yura.page.evaluate(() => window.WM.state.activeRoom);
     const rows = await yura.page.evaluate(async (r) => {

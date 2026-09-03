@@ -544,14 +544,20 @@ const handler = (req, res) => {
             return res.end(gif);
         }
         const q = params.get('q') || '';
+        // Размеры разные — как у настоящих гифок: так видно, что кладка
+        // раскладывает их по колонкам, а не режет в квадраты.
+        const sizes = [[200, 150], [180, 240], [220, 220], [300, 168], [160, 220], [240, 135]];
         return json(res, 200, {
             ok: true,
-            results: [1, 2, 3].map((n) => ({
+            provider: 'mock',
+            results: [1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => ({
                 id: 'g' + n,
                 title: (q || 'популярное') + ' ' + n,
                 preview: 'https://media.tenor.com/preview' + n + '.gif',
                 url: 'https://media.tenor.com/clip' + n + '.mp4',
-                width: 200, height: 150, video: true
+                width: sizes[(n - 1) % sizes.length][0],
+                height: sizes[(n - 1) % sizes.length][1],
+                video: true
             }))
         });
     }

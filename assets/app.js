@@ -110,6 +110,8 @@
         serviceTried: {},       // что перебрали при поиске — видно в настройках
         gifInfo: null,          // что ответил сервер про поиск гифок
         gifTab: 'search',       // какая вкладка панели гифок открыта
+        swallowTap: false,      // это касание уже закрыло панель гифок
+        gifHeld: false,         // на гифке было долгое нажатие, а не выбор
         aiBusy: false,
         firstChatPaint: true,
         serverChats: true,
@@ -272,6 +274,17 @@
     function isGifRef(text) { return typeof text === 'string' && text.indexOf('wmgif:') === 0; }
 
     /* «wmgif:<номер вложения>:<ширина>:<высота>» */
+    /* Гифка показывается во всю ширину пузыря — как фотография, а не
+       маленьким квадратиком. Считаем размер по её пропорциям, чтобы место
+       под неё было занято ещё до загрузки. */
+    function gifBoxSize(width, height) {
+        var maxW = Math.min(280, Math.round((window.innerWidth || 390) * 0.68));
+        var maxH = Math.round((window.innerHeight || 720) * 0.42);
+        var scale = Math.min(maxW / Math.max(1, width), maxH / Math.max(1, height));
+        return 'width:' + Math.round(width * scale) + 'px;' +
+            'height:' + Math.round(height * scale) + 'px';
+    }
+
     function gifInfo(text) {
         var parts = String(text).split(':');
         return {
@@ -2138,8 +2151,8 @@
             $('gif-grid').innerHTML = items.map(function (g) {
                 return '<button type="button" class="gif-item" data-mine="' + esc(g.id) + '" ' +
                     'data-w="' + esc(g.w) + '" data-h="' + esc(g.h) + '">' +
-                    '<img alt="гифка" src="' + esc(g.data) + '">' +
-                    '<span class="gif-del" data-drop="' + esc(g.id) + '">✕</span></button>';
+                    '<img alt="гифка" style="aspect-ratio:' + esc(g.w) + '/' + esc(g.h) + '" ' +
+                    'src="' + esc(g.data) + '"></button>';
             }).join('');
         });
     }
@@ -2157,6 +2170,42 @@
         });
     }
 
+    /* Долгое нажатие на своей гифке предлагает убрать её из списка —
+       крестики на каждой картинке только рябили бы в глазах. */
+    function bindGifHold() {
+        var grid = $('gif-grid');
+        var hold = null;
+        var start = null;
+
+        var cancel = function () {
+            if (hold) { clearTimeout(hold); hold = null; }
+            start = null;
+        };
+
+        grid.addEventListener('pointerdown', function (e) {
+            var item = e.target.closest('.gif-item[data-mine]');
+            if (!item) return;
+            var id = item.getAttribute('data-mine');
+            start = { x: e.clientX, y: e.clientY };
+            hold = setTimeout(function () {
+                hold = null;
+                state.gifHeld = true;
+                vibrate();
+                confirmBox('Убрать гифку?',
+                    'Она исчезнет из ваших гифок. В переписке она останется.',
+                    'Убрать', function () { forgetGif(id).then(renderMyGifs); });
+            }, 450);
+        });
+
+        grid.addEventListener('pointermove', function (e) {
+            if (!start) return;
+            if (Math.abs(e.clientX - start.x) > 8 || Math.abs(e.clientY - start.y) > 8) cancel();
+        });
+        grid.addEventListener('pointerup', cancel);
+        grid.addEventListener('pointercancel', cancel);
+        grid.addEventListener('scroll', cancel);
+    }
+
     /* --------------------------------------------------------- панель */
 
     function setupGifs() {
@@ -2169,11 +2218,10 @@
         Array.prototype.forEach.call($('gif-tabs').children, function (btn) {
             btn.classList.toggle('active', btn.getAttribute('data-gtab') === tab);
         });
-        $('gif-search-row').hidden = tab !== 'search';
         $('gif-grid').innerHTML = '';
         renderGifNote('');
 
-        if (tab === 'mine') renderMyGifs();
+        if (tab === 'mine') { $('gif-search').value = ''; renderMyGifs(); }
         else searchGifs($('gif-search').value.trim());
     }
 
@@ -2181,9 +2229,17 @@
         var panel = $('gif-panel');
         if (!panel.hidden) { closeGifs(); return; }
 
+        // Панель отнимает часть экрана — переписку подтягиваем, чтобы
+        // последнее сообщение осталось на виду, а не уехало под панель.
+        var box = $('msg-list');
+        var atBottom = isAtBottom();
+
         panel.hidden = false;
         panel.classList.add('open');
         $('gif-search').value = '';
+        if (atBottom && box) {
+            requestAnimationFrame(function () { box.scrollTop = box.scrollHeight; });
+        }
 
         // Открываемся на поиске, если он настроен, иначе — на своих гифках.
         findGifServer().then(function (server) {
@@ -2194,9 +2250,14 @@
 
     function closeGifs() {
         var panel = $('gif-panel');
+        var box = $('msg-list');
+        var atBottom = isAtBottom();
         panel.classList.remove('open');
         panel.hidden = true;
         stopGifPreviews();
+        if (atBottom && box) {
+            requestAnimationFrame(function () { box.scrollTop = box.scrollHeight; });
+        }
     }
 
     function stopGifPreviews() {
@@ -2232,6 +2293,7 @@
                                 'data-gif-url="' + esc(g.url) + '" ' +
                                 'data-w="' + esc(g.width) + '" data-h="' + esc(g.height) + '">' +
                                 '<img loading="lazy" alt="' + esc(g.title) + '" ' +
+                                'style="aspect-ratio:' + esc(g.width) + '/' + esc(g.height) + '" ' +
                                 'src="' + esc(gifProxy(server, g.preview)) + '"></button>';
                         }).join('');
                     });
@@ -2318,21 +2380,44 @@
     function hydrateGifs() {
         var box = $('msg-list');
         if (!box) return;
-        var nodes = box.querySelectorAll('.gif[data-gif]:not([data-loaded])');
-        var top = box.scrollTop - 400;
-        var bottom = box.scrollTop + box.clientHeight + 400;
+        var nodes = box.querySelectorAll('.gif-box[data-gif]:not([data-loaded])');
+        var top = box.scrollTop - 500;
+        var bottom = box.scrollTop + box.clientHeight + 500;
         var started = 0;
 
         Array.prototype.forEach.call(nodes, function (node) {
-            if (started >= 3) return;
+            if (started >= 6) return;
             if (node.offsetTop < top || node.offsetTop > bottom) return;
             started++;
             node.setAttribute('data-loaded', '1');
             fetchAttachment(node.getAttribute('data-gif')).then(function (data) {
-                node.src = data;
-                node.play().catch(function () { /* автозапуск запретили */ });
+                node.innerHTML = '';
+                node.appendChild(gifElement(data));
             }).catch(function () { node.removeAttribute('data-loaded'); });
         });
+    }
+
+    /* Гифка приходит либо картинкой (.gif), либо коротким роликом (.mp4).
+       Раньше и то и другое пытались показать через <video> — картинка при
+       этом не показывалась вовсе. */
+    function gifElement(data) {
+        if (/^data:video\//.test(String(data))) {
+            var video = document.createElement('video');
+            video.className = 'gif';
+            video.muted = true;
+            video.loop = true;
+            video.autoplay = true;
+            video.playsInline = true;
+            video.setAttribute('playsinline', '');
+            video.src = data;
+            video.play().catch(function () { /* автозапуск запретили */ });
+            return video;
+        }
+        var img = document.createElement('img');
+        img.className = 'gif';
+        img.alt = 'гифка';
+        img.src = data;
+        return img;
     }
 
     /* ------------------------------------------------- кнопка микрофона
@@ -3831,9 +3916,8 @@
         } else if (isGifRef(body)) {
             var gif = gifInfo(body);
             // Место под гифку резервируется заранее — переписка не «прыгает».
-            content = '<div class="gif-box" style="aspect-ratio:' + esc(gif.width) + '/' +
-                esc(gif.height) + '"><video class="gif" data-gif="' + esc(gif.id) + '"' +
-                ' muted loop playsinline preload="none"></video></div>';
+            content = '<div class="gif-box" data-gif="' + esc(gif.id) + '" style="' +
+                esc(gifBoxSize(gif.width, gif.height)) + '"></div>';
         } else if (isCallLog(body)) {
             content = '<span class="call-log">' + esc(callLogText(body)) + '</span>';
         } else if (isVideoRef(body)) {
@@ -3896,11 +3980,18 @@
             '</div>';
     }
 
+    /* Гифка занимает пузырь целиком, без полей и подложки — так же, как в
+       привычных мессенджерах: рамка вокруг картинки только мешает. */
+    function isMediaOnly(m) {
+        return isGifRef(m.body === undefined ? m.text : m.body);
+    }
+
     function createBubble(m, isGroup) {
         var node = document.createElement('div');
         var out = m.user_id === state.me.id;
         node.className = 'bubble ' + (out ? 'out' : 'in') +
-            (m.pending ? ' pending' : '') + (m.failed ? ' failed' : '');
+            (m.pending ? ' pending' : '') + (m.failed ? ' failed' : '') +
+            (isMediaOnly(m) ? ' media' : '');
         node.setAttribute('data-key', 'msg:' + messageKey(m));
         node.setAttribute('data-msg', m.id);
         node.innerHTML = bubbleInner(m, isGroup);
@@ -3915,6 +4006,7 @@
         node.setAttribute('data-msg', m.id);
         node.classList.toggle('pending', !!m.pending);
         node.classList.toggle('failed', !!m.failed);
+        node.classList.toggle('media', isMediaOnly(m));
         node.innerHTML = bubbleInner(m, isGroup);
     }
 
@@ -4320,6 +4412,7 @@
     function gestureDown(e) {
         if (!e.target.closest) return;
         if (e.button !== undefined && e.button !== 0) return;
+        state.swallowTap = false;
         var bubble = e.target.closest('.bubble');
         if (!bubble || e.target.closest('.msg-menu') || e.target.closest('a.link')) return;
 
@@ -4379,6 +4472,13 @@
         if (reply && !reply.pending && canPost(state.activeChat)) {
             vibrate();
             startReply(reply);
+            return;
+        }
+        // Открыта панель гифок — первое касание переписки просто закрывает её,
+        // и это касание больше ничего не задевает.
+        if (tap && !$('gif-panel').hidden) {
+            closeGifs();
+            state.swallowTap = true;
             return;
         }
         if (tap && node && !tapHitsControl(e)) openPicker(node, id);
@@ -6186,25 +6286,28 @@
         $('btn-attach').addEventListener('click', function () { $('m-file').click(); });
         $('btn-gif').addEventListener('click', openGifs);
         $('gif-close').addEventListener('click', closeGifs);
-        $('gif-search').addEventListener('input', function () { searchGifs(this.value.trim()); });
+        $('gif-search').addEventListener('input', function () {
+            // Начали набирать — панель сама показывает найденное.
+            if (state.gifTab !== 'search') setGifTab('search');
+            else searchGifs(this.value.trim());
+        });
+        $('gif-search').addEventListener('focus', function () {
+            if (state.gifTab !== 'search') setGifTab('search');
+        });
         $('gif-tabs').addEventListener('click', function (e) {
             var btn = e.target.closest('[data-gtab]');
             if (btn) setGifTab(btn.getAttribute('data-gtab'));
         });
         $('gif-grid').addEventListener('click', function (e) {
-            var drop = e.target.closest('[data-drop]');
-            if (drop) {                                  // крестик убирает гифку из своих
-                e.stopPropagation();
-                forgetGif(drop.getAttribute('data-drop')).then(renderMyGifs);
-                return;
-            }
             var item = e.target.closest('.gif-item');
             if (!item) return;
+            if (state.gifHeld) { state.gifHeld = false; return; }   // это было долгое нажатие
             var w = Number(item.getAttribute('data-w'));
             var h = Number(item.getAttribute('data-h'));
             if (item.hasAttribute('data-mine')) sendMyGif(item.getAttribute('data-mine'), w, h);
             else sendGif(item.getAttribute('data-gif-url'), w, h);
         });
+        bindGifHold();
         $('m-file').addEventListener('change', function () { handlePhotoFile(this); });
         $('m-input').addEventListener('input', function () { autoGrow(this); updateComposer(); });
         bindVoiceButton();
@@ -6213,6 +6316,11 @@
         });
 
         $('msg-list').addEventListener('click', function (e) {
+            // Открытая панель гифок закрывается первым же касанием переписки:
+            // так она не мешается под руками.
+            if (state.swallowTap) { state.swallowTap = false; return; }
+            if (!$('gif-panel').hidden) { closeGifs(); return; }
+
             if (e.target.getAttribute && e.target.getAttribute('data-photo')) {
                 $('lightbox-img').src = e.target.getAttribute('src');
                 $('lightbox').classList.add('show');

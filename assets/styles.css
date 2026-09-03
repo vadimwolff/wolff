@@ -662,6 +662,36 @@ body.searching #page-main .search-row { padding-top: calc(var(--safe-top) + 10px
     border-bottom-right-radius: 5px;
 }
 
+/* Сообщение-гифка: подложки и полей нет, время — поверх картинки. */
+.bubble.media {
+    padding: 0;
+    background: none;
+    max-width: 82%;
+}
+
+.bubble.media .text { padding: 0; }
+
+.bubble.media .bubble-meta {
+    position: absolute;
+    right: 8px;
+    bottom: 7px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.45);
+    color: #fff;
+    opacity: 1;
+}
+
+.bubble.media .reactions-row { margin-top: 5px; }
+
+.bubble.media .quote {
+    background: rgba(0, 0, 0, 0.32);
+    border-radius: 12px;
+    padding: 6px 10px;
+    margin-bottom: 5px;
+    color: #fff;
+}
+
 .bubble.pending { opacity: 0.6; }
 .bubble.failed { outline: 1px solid var(--danger); }
 
@@ -710,41 +740,35 @@ body.searching #page-main .search-row { padding-top: calc(var(--safe-top) + 10px
     flex: 0 0 auto;
     background: var(--card);
     border-top: 0.5px solid var(--border);
-    padding: 10px 12px 0;
-    max-height: 46vh;
+    border-radius: 18px 18px 0 0;
+    box-shadow: 0 -10px 28px rgba(0, 0, 0, 0.18);
+    padding: 6px 10px 0;
+    max-height: 44vh;
     display: flex;
     flex-direction: column;
-    animation: gifIn 0.22s var(--ease-out);
+    animation: gifIn 0.24s var(--ease-out);
 }
 
 @keyframes gifIn {
-    from { opacity: 0; transform: translateY(12px); }
+    from { opacity: 0; transform: translateY(14px); }
     to { opacity: 1; transform: translateY(0); }
 }
 
-.gif-head { display: flex; gap: 10px; align-items: center; }
-
-/* Две вкладки: свои гифки (работают всегда) и поиск. */
-.gif-tabs { flex: 1; display: flex; gap: 6px; }
-
-.gif-tabs button {
-    border: none;
-    background: var(--hover);
-    color: var(--text-muted);
-    padding: 7px 16px;
-    border-radius: 999px;
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.18s var(--ease-out), color 0.18s var(--ease-out);
+/* Полоска сверху: сразу видно, что это выдвижная панель. */
+.gif-grab {
+    width: 38px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--border);
+    margin: 2px auto 8px;
+    flex: 0 0 auto;
 }
 
-.gif-tabs button.active { background: var(--accent); color: #fff; }
+.gif-head { display: flex; gap: 8px; align-items: center; }
 
-.gif-search-row { margin-top: 8px; }
-
-.gif-search-row input {
-    width: 100%;
+.gif-head input {
+    flex: 1;
+    min-width: 0;
     padding: 9px 14px;
     border-radius: 12px;
     border: none;
@@ -757,64 +781,92 @@ body.searching #page-main .search-row { padding-top: calc(var(--safe-top) + 10px
     border: none;
     background: var(--hover);
     color: var(--text-muted);
-    width: 30px;
-    height: 30px;
+    width: 32px;
+    height: 32px;
+    flex: 0 0 auto;
     border-radius: 50%;
     cursor: pointer;
 }
 
-.gif-grid {
-    margin-top: 10px;
-    overflow-y: auto;
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
+/* Источник гифок — «Мои» или «Популярное», как вкладки в мессенджере. */
+.gif-tabs {
+    display: flex;
     gap: 6px;
+    margin: 8px 0 2px;
+    flex: 0 0 auto;
+}
+
+.gif-tabs button {
+    border: none;
+    background: var(--hover);
+    color: var(--text-muted);
+    padding: 6px 14px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.18s var(--ease-out), color 0.18s var(--ease-out);
+}
+
+.gif-tabs button.active { background: var(--accent); color: #fff; }
+
+/* Кладка в три колонки: каждая гифка своей высоты и видна целиком. */
+.gif-grid {
+    margin-top: 8px;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    column-count: 3;
+    column-gap: 6px;
     padding-bottom: 10px;
 }
 
 .gif-item {
+    display: block;
+    width: 100%;
+    break-inside: avoid;
+    margin: 0 0 6px;
     border: none;
     padding: 0;
     background: var(--hover);
     border-radius: 10px;
     overflow: hidden;
-    aspect-ratio: 1 / 1;
+    position: relative;
     cursor: pointer;
     transition: transform 0.15s var(--ease-out);
 }
 
 .gif-item:active { transform: scale(0.94); }
-.gif-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
-/* Крестик убирает гифку из своих — как в списке недавних. */
-.gif-item { position: relative; }
-
-.gif-del {
-    position: absolute;
-    top: 3px;
-    right: 3px;
-    width: 20px;
-    height: 20px;
-    line-height: 20px;
-    text-align: center;
-    border-radius: 50%;
-    background: rgba(0, 0, 0, 0.55);
-    color: #fff;
-    font-size: 12px;
+.gif-item img {
+    width: 100%;
+    height: auto;
+    display: block;
+    background: var(--hover);
 }
 
-.gif-note { color: var(--text-muted); font-size: 13px; padding: 10px 2px; margin: 0; }
+.gif-note {
+    color: var(--text-muted);
+    font-size: 13px;
+    line-height: 1.4;
+    padding: 12px 4px 16px;
+    margin: 0;
+}
 
 /* В переписке место под гифку резервируется заранее, чтобы список не прыгал. */
 .gif-box {
-    width: 200px;
     max-width: 100%;
-    border-radius: 12px;
+    border-radius: 14px;
     overflow: hidden;
-    background: rgba(127, 127, 127, 0.18);
+    background: rgba(127, 127, 127, 0.16);
+    display: block;
 }
 
-.gif-box video { width: 100%; height: 100%; display: block; object-fit: cover; }
+.gif-box img, .gif-box video {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: cover;
+}
 
 /* Запись о звонке — спокойная строка, а не обычное сообщение. */
 .call-log { display: inline-flex; align-items: center; gap: 6px; opacity: 0.9; }
