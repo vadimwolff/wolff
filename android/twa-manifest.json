@@ -1,0 +1,47 @@
+{
+  "packageId": "app.wolffmsg.twa",
+  "host": "example.vercel.app",
+  "name": "WolffMsg",
+  "launcherName": "WolffMsg",
+  "display": "standalone",
+  "themeColor": "#0e0e10",
+  "themeColorDark": "#0e0e10",
+  "navigationColor": "#0e0e10",
+  "navigationColorDark": "#0e0e10",
+  "navigationDividerColor": "#0e0e10",
+  "navigationDividerColorDark": "#0e0e10",
+  "backgroundColor": "#0e0e10",
+  "enableNotifications": true,
+  "startUrl": "/",
+  "iconUrl": "https://example.vercel.app/assets/icon-512.png",
+  "maskableIconUrl": "https://example.vercel.app/assets/icon-maskable.png",
+  "monochromeIconUrl": "https://example.vercel.app/assets/badge-96.png",
+  "splashScreenFadeOutDuration": 300,
+  "signingKey": {
+    "path": "./android.keystore",
+    "alias": "wolffmsg"
+  },
+  "appVersionName": "1.0.0",
+  "appVersionCode": 1,
+  "shortcuts": [
+    {
+      "name": "Новый чат",
+      "shortName": "Написать",
+      "url": "/?action=new",
+      "chosenIconUrl": "https://example.vercel.app/assets/icon-192.png"
+    }
+  ],
+  "generatorApp": "bubblewrap-cli",
+  "webManifestUrl": "https://example.vercel.app/manifest.webmanifest",
+  "fallbackType": "customtabs",
+  "features": {},
+  "alphaDependencies": { "enabled": false },
+  "enableSiteSettingsShortcut": true,
+  "isChromeOSOnly": false,
+  "isMetaQuest": false,
+  "fullScopeUrl": "https://example.vercel.app/",
+  "minSdkVersion": 21,
+  "orientation": "portrait",
+  "fingerprints": [],
+  "additionalTrustedOrigins": []
+}

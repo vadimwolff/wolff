@@ -1,0 +1,139 @@
+name: Собрать APK
+
+# Запускается вручную: Actions → «Собрать APK» → Run workflow.
+# На выходе — подписанные APK (поставить на телефон) и AAB (для магазина).
+
+on:
+  workflow_dispatch:
+    inputs:
+      site:
+        description: 'Адрес сайта, который откроет приложение (https://имя.vercel.app)'
+        required: true
+        type: string
+      name:
+        description: 'Название приложения на телефоне'
+        required: false
+        default: 'WolffMsg'
+        type: string
+      package:
+        description: 'Имя пакета (пусто — получится из адреса сайта)'
+        required: false
+        default: ''
+        type: string
+      version:
+        description: 'Версия приложения, например 1.0.0'
+        required: false
+        default: '1.0.0'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Bubblewrap работает с JDK 17 — на нём и собираем.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Подготовить настройки приложения
+        run: node tools/twa-config.mjs "${{ inputs.site }}" "${{ inputs.package }}" "${{ inputs.name }}" "${{ inputs.version }}"
+
+      # Ключ подписи. Он должен быть ОДИН И ТОТ ЖЕ у всех сборок: магазин
+      # принимает обновления только с тем же ключом. Если ключ уже сохранён в
+      # секретах репозитория — берём его, иначе создаём новый и кладём в
+      # результаты сборки, чтобы его сохранили.
+      - name: Ключ подписи
+        id: keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          set -e
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > android/android.keystore
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            echo "Использую сохранённый ключ подписи."
+          else
+            PASS="${KEYSTORE_PASSWORD:-wolffmsg}"
+            keytool -genkeypair -v \
+              -keystore android/android.keystore \
+              -alias wolffmsg -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$PASS" -keypass "$PASS" \
+              -dname "CN=${{ inputs.name }}, OU=WolffMsg, O=WolffMsg, C=RU"
+            echo "created=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Создан НОВЫЙ ключ подписи. Сохраните android.keystore из результатов сборки и добавьте его в секреты — без него обновить приложение в магазине будет невозможно."
+          fi
+
+      - name: Собрать приложение
+        env:
+          BUBBLEWRAP_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD || 'wolffmsg' }}
+          BUBBLEWRAP_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD || 'wolffmsg' }}
+        run: |
+          set -e
+          npm install -g @bubblewrap/cli@latest
+
+          mkdir -p "$HOME/.bubblewrap"
+          printf '{"jdkPath":"%s","androidSdkPath":"%s"}\n' "$JAVA_HOME" "$ANDROID_HOME" \
+            > "$HOME/.bubblewrap/config.json"
+
+          cd android
+          # Проект раскладывается из twa-manifest.json: init задавал бы вопросы,
+          # а update и build берут готовые ответы из файла.
+          bubblewrap update --skipVersionUpgrade || echo "update пропущен — проект соберёт build"
+          bubblewrap build --skipPwaValidation
+
+      - name: Отпечаток ключа и файл связки с сайтом
+        env:
+          PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD || 'wolffmsg' }}
+        run: |
+          set -e
+          mkdir -p out
+          FP=$(keytool -list -v -keystore android/android.keystore -alias wolffmsg \
+                -storepass "$PASS" | grep -m1 'SHA256:' | sed 's/.*SHA256: *//' | tr -d ' \r')
+          export FP
+          node tools/assetlinks.mjs > out/assetlinks.json
+          cat out/assetlinks.json
+
+          {
+            echo "### Приложение собрано"
+            echo ""
+            echo "Чтобы приложение открывалось без адресной строки браузера, добавьте в"
+            echo "репозиторий файл \`.well-known/assetlinks.json\` с таким содержимым и"
+            echo "выложите сайт заново:"
+            echo ""
+            echo '```json'
+            cat out/assetlinks.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Собрать результаты
+        run: |
+          set -e
+          mkdir -p out
+          APK=$(find android -maxdepth 3 -name '*.apk' | head -1 || true)
+          AAB=$(find android -maxdepth 3 -name '*.aab' | head -1 || true)
+          if [ -n "$APK" ]; then cp "$APK" "out/${{ inputs.name }}.apk"; fi
+          if [ -n "$AAB" ]; then cp "$AAB" "out/${{ inputs.name }}.aab"; fi
+          if [ "${{ steps.keystore.outputs.created }}" = "true" ]; then
+            cp android/android.keystore out/android.keystore
+            base64 -w0 android/android.keystore > out/android.keystore.base64.txt
+          fi
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wolffmsg-android
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30

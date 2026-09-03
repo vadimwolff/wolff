@@ -3,3 +3,15 @@ node_modules/
 .DS_Store
 _site/
 *.log
+
+# Сборка приложения для Android: ключ подписи и файлы проекта, которые
+# создаёт bubblewrap. Ключ хранится в секретах репозитория, а не здесь.
+android/android.keystore
+android/app/
+android/build/
+android/gradle*
+android/*.apk
+android/*.aab
+android/store_icon.png
+android/.gradle/
+android/local.properties

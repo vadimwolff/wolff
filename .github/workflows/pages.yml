@@ -28,6 +28,8 @@ jobs:
           mkdir -p _site
           cp index.html 404.html sw.js manifest.webmanifest _site/
           cp -r assets _site/
+          # связка с приложением для Android, если файл уже создан
+          [ -d .well-known ] && cp -r .well-known _site/ || true
           # Jekyll не нужен, иначе он может съесть служебные файлы
           touch _site/.nojekyll
 
