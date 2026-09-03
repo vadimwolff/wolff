@@ -29,6 +29,15 @@ const browser = await chromium.launch({
     args: ['--no-sandbox']
 });
 
+
+/* Гифки живут под скрепкой: своей кнопки в строке ввода больше нет. */
+async function openGifPanel(page) {
+    await page.click('#btn-attach');
+    await page.waitForSelector('#attach-menu.show', { timeout: 10000 });
+    await page.click('#attach-gif');
+    await page.waitForSelector('#gif-panel:not([hidden])', { timeout: 15000 });
+}
+
 console.log('\n=== WolffMsg e2e (сайт отдельно, сервер отдельно) ===');
 
 /* Сайт лежит на одном адресе, база — там же напрямую, а серверных функций
@@ -108,7 +117,8 @@ await step('тот же адрес включил и гифки', async () => {
         null, { timeout: 25000 });
     await page.click('#chat-list .f-item:has-text("WolffAI")');
     await page.waitForSelector('#page-chat.active', { timeout: 15000 });
-    await page.waitForSelector('#btn-gif:not([hidden])', { timeout: 25000 });
+    await openGifPanel(page);
+    await page.click('#gif-close');
 });
 
 await step('помощник отвечает в своём чате', async () => {
@@ -149,8 +159,7 @@ await step('помощник не пытается разглядывать ги
 await step('своя гифка попадает в «Мои» и уходит одним касанием', async () => {
     const before = await page.locator('.bubble.out .gif-box').count();
 
-    await page.click('#btn-gif');
-    await page.waitForSelector('#gif-panel:not([hidden])', { timeout: 10000 });
+    await openGifPanel(page);
     await page.click('#gif-tabs [data-gtab="mine"]');
     await page.waitForSelector('#gif-grid .gif-item[data-mine]', { timeout: 15000 });
 
@@ -166,8 +175,7 @@ await step('своя гифка попадает в «Мои» и уходит �
 });
 
 await step('долгое нажатие убирает гифку из своих', async () => {
-    await page.click('#btn-gif');
-    await page.waitForSelector('#gif-panel:not([hidden])', { timeout: 10000 });
+    await openGifPanel(page);
     await page.click('#gif-tabs [data-gtab="mine"]');
     await page.waitForSelector('#gif-grid .gif-item[data-mine]', { timeout: 15000 });
 
@@ -241,8 +249,7 @@ await step('в настройках видно, почему поиск гифо
     await page.waitForSelector('#page-main.active', { timeout: 15000 });
     await page.click('#chat-list .f-item:has-text("WolffAI")');
     await page.waitForSelector('#page-chat.active', { timeout: 15000 });
-    await page.click('#btn-gif');
-    await page.waitForSelector('#gif-panel:not([hidden])', { timeout: 10000 });
+    await openGifPanel(page);
     await page.waitForFunction(
         () => document.querySelector('#gif-tabs [data-gtab="mine"]').classList.contains('active'),
         null, { timeout: 15000 });

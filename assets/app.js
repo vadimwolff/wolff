@@ -113,6 +113,7 @@
         swallowTap: false,      // это касание уже закрыло панель гифок
         gifHeld: false,         // на гифке было долгое нажатие, а не выбор
         gifScrollTimer: null,
+        gifDragged: false,      // полоску панели тянули, а не нажали
         aiBusy: false,
         firstChatPaint: true,
         serverChats: true,
@@ -2207,14 +2208,45 @@
         grid.addEventListener('scroll', cancel);
     }
 
+    /* Смахивание вниз по выдвижной панели — привычный способ её закрыть. */
+    function bindSheetSwipe(sheet, onClose) {
+        var drag = null;
+
+        sheet.addEventListener('pointerdown', function (e) {
+            if (e.target.closest('button, input')) return;
+            drag = { y: e.clientY, dy: 0 };
+        });
+
+        sheet.addEventListener('pointermove', function (e) {
+            if (!drag) return;
+            drag.dy = Math.max(0, e.clientY - drag.y);
+            sheet.style.transition = 'none';
+            sheet.style.transform = 'translateY(' + Math.round(drag.dy) + 'px)';
+        });
+
+        var release = function () {
+            if (!drag) return;
+            var dy = drag.dy;
+            drag = null;
+            sheet.style.transition = 'transform 0.18s var(--ease-out)';
+            sheet.style.transform = '';
+            if (dy > 70) onClose();
+        };
+
+        sheet.addEventListener('pointerup', release);
+        sheet.addEventListener('pointercancel', release);
+        sheet.addEventListener('pointerleave', release);
+    }
+
     /* Панель закрывается смахиванием вниз — за полоску сверху или за саму
-       панель, когда сетка гифок пролистана в начало. */
+       панель, когда сетка гифок пролистана в начало. Вверх — наоборот:
+       панель разворачивается почти во весь экран. */
     function bindGifSwipe() {
         var panel = $('gif-panel');
         var drag = null;
 
         panel.addEventListener('pointerdown', function (e) {
-            if (e.target.closest('input, .gif-item, .gif-close')) return;
+            if (e.target.closest('input, .gif-item, .gif-close, .gif-tabs')) return;
             if (e.target.closest('#gif-grid') && $('gif-grid').scrollTop > 4) return;
             drag = { y: e.clientY, dy: 0 };
         });
@@ -2222,9 +2254,11 @@
         panel.addEventListener('pointermove', function (e) {
             if (!drag) return;
             drag.dy = e.clientY - drag.y;
-            if (drag.dy <= 0) { panel.style.transform = ''; return; }
+            // Вниз — тянем панель за пальцем; вверх — показываем, что развернётся.
             panel.style.transition = 'none';
-            panel.style.transform = 'translateY(' + Math.round(drag.dy) + 'px)';
+            panel.style.transform = drag.dy > 0
+                ? 'translateY(' + Math.round(drag.dy) + 'px)'
+                : 'translateY(' + Math.round(Math.max(drag.dy / 3, -18)) + 'px)';
         });
 
         var release = function () {
@@ -2233,12 +2267,35 @@
             drag = null;
             panel.style.transition = '';
             panel.style.transform = '';
-            if (dy > 70) dismissGifs();
+
+            state.gifDragged = Math.abs(dy) > 8;
+            if (dy < -50) { expandGifs(true); return; }        // потянули вверх
+            if (dy > 70) {
+                // Развёрнутая панель сначала возвращается к обычному размеру.
+                if (panel.classList.contains('tall')) expandGifs(false);
+                else dismissGifs();
+            }
         };
 
         panel.addEventListener('pointerup', release);
         panel.addEventListener('pointercancel', release);
         panel.addEventListener('pointerleave', release);
+
+        // Двойное назначение полоски: касание тоже разворачивает и сворачивает.
+        $('gif-grab').addEventListener('click', function () {
+            if (state.gifDragged) { state.gifDragged = false; return; }
+            expandGifs(!panel.classList.contains('tall'));
+        });
+    }
+
+    /* Развёрнутая панель занимает почти весь экран — так удобнее выбирать. */
+    function expandGifs(on) {
+        var panel = $('gif-panel');
+        if (panel.classList.contains('tall') === !!on) return;
+        panel.classList.toggle('tall', !!on);
+        vibrate();
+        var box = $('msg-list');
+        if (box) requestAnimationFrame(function () { box.scrollTop = box.scrollHeight; });
     }
 
     /* Уходит вниз — так же, как её смахнули. */
@@ -2299,7 +2356,7 @@
         var panel = $('gif-panel');
         var box = $('msg-list');
         var atBottom = isAtBottom();
-        panel.classList.remove('open');
+        panel.classList.remove('open', 'tall');
         panel.hidden = true;
         stopGifPreviews();
         if (atBottom && box) {
@@ -5788,6 +5845,20 @@
     }
 
     /* Подписка на доставку: адрес браузера сохраняется в базе. */
+    /* Подписка привязана к ключу сервера. Ключ сменили — старая подписка
+       молча перестаёт работать, поэтому сверяем и переподписываемся. */
+    function sameVapid(sub, vapid) {
+        try {
+            var used = sub.options && sub.options.applicationServerKey;
+            if (!used) return true;                 // браузер не говорит — верим
+            var mine = base64ToBytes(vapid);
+            var theirs = new Uint8Array(used);
+            if (theirs.length !== mine.length) return false;
+            for (var i = 0; i < mine.length; i++) if (mine[i] !== theirs[i]) return false;
+            return true;
+        } catch (e) { return true; }
+    }
+
     function enablePush() {
         if (!navigator.serviceWorker || typeof PushManager === 'undefined' || !state.me) {
             return Promise.resolve(false);
@@ -5796,11 +5867,19 @@
             if (!server) return false;
             return navigator.serviceWorker.ready.then(function (reg) {
                 return reg.pushManager.getSubscription().then(function (existing) {
-                    if (existing) return existing;
-                    return reg.pushManager.subscribe({
-                        userVisibleOnly: true,
-                        applicationServerKey: base64ToBytes(server.vapid)
-                    });
+                    if (existing && sameVapid(existing, server.vapid)) return existing;
+                    var fresh = function () {
+                        return reg.pushManager.subscribe({
+                            userVisibleOnly: true,
+                            applicationServerKey: base64ToBytes(server.vapid)
+                        });
+                    };
+                    if (!existing) return fresh();
+                    // Ключ сервера сменился — старую подписку убираем.
+                    var old = subscriptionFields(existing).endpoint;
+                    return existing.unsubscribe().catch(function () { return null; })
+                        .then(function () { return rpc('wm_push_drop', { p_endpoint: old }).catch(function () { return null; }); })
+                        .then(fresh);
                 });
             }).then(function (sub) {
                 var fields = subscriptionFields(sub);
@@ -5974,9 +6053,111 @@
             pill.className = 'pill bad';
             return;
         }
-        var on = notifyEnabled();
-        pill.textContent = on ? 'вкл' : 'выкл';
-        pill.className = 'pill ' + (on ? 'ok' : '');
+        if (!notifyEnabled()) {
+            pill.textContent = 'выкл';
+            pill.className = 'pill';
+            return;
+        }
+
+        // Включены — но доходят ли при закрытом приложении? Это решает сервер.
+        pill.textContent = 'вкл';
+        pill.className = 'pill ok';
+        findPushServer().then(function (server) {
+            if (!notifyEnabled()) return;
+            pill.textContent = server ? 'и при закрытом' : 'пока открыто';
+            pill.className = 'pill ' + (server ? 'ok' : 'warn');
+        });
+    }
+
+    /* Ключи доставки (VAPID) создаются прямо здесь: их надо один раз положить
+       в настройки сервера. Закрытый ключ никуда не отправляется — он только
+       показывается, чтобы его скопировали. */
+    function makeVapidKeys() {
+        return crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign'])
+            .then(function (pair) {
+                return Promise.all([
+                    crypto.subtle.exportKey('raw', pair.publicKey),
+                    crypto.subtle.exportKey('jwk', pair.privateKey)
+                ]);
+            }).then(function (parts) {
+                var bytes = new Uint8Array(parts[0]);
+                var raw = '';
+                for (var i = 0; i < bytes.length; i++) raw += String.fromCharCode(bytes[i]);
+                var pub = btoa(raw).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+                return { publicKey: pub, privateKey: parts[1].d };
+            });
+    }
+
+    function showPushSetup() {
+        makeVapidKeys().then(function (keys) {
+            $('keys-text').value =
+                'VAPID_PUBLIC_KEY\n' + keys.publicKey + '\n\n' +
+                'VAPID_PRIVATE_KEY\n' + keys.privateKey + '\n\n' +
+                'VAPID_SUBJECT\nmailto:' + (state.me ? state.me.nickname : 'admin') + '@example.com';
+            $('keys-modal').classList.add('show');
+        }).catch(function () { toast('Не удалось создать ключи'); });
+    }
+
+    function copyKeys() {
+        var area = $('keys-text');
+        area.select();
+        var done = function () { toast('Скопировано'); };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(area.value).then(done, function () {
+                try { document.execCommand('copy'); done(); } catch (e) { toast('Скопируйте вручную'); }
+            });
+            return;
+        }
+        try { document.execCommand('copy'); done(); } catch (e) { toast('Скопируйте вручную'); }
+    }
+
+    /* Проверяем, доехали ли ключи до сервера. */
+    function recheckPush() {
+        delete state.services.push;
+        delete state.serviceTasks.push;
+        delete state.serviceTried.push;
+        enablePush().then(function (background) {
+            updateNotifyPill();
+            if (background) {
+                $('keys-modal').classList.remove('show');
+                toast('Доставка настроена');
+            } else {
+                toast('Сервер пока без ключей — сделайте Redeploy и проверьте снова');
+            }
+        });
+    }
+
+    /* Что именно мешает уведомлениям — понятным языком. */
+    function checkNotifications() {
+        if (typeof Notification === 'undefined') {
+            toast('Браузер не умеет показывать уведомления');
+            return;
+        }
+        if (Notification.permission === 'denied') {
+            confirmBox('Уведомления запрещены',
+                'Разрешение выдаётся в настройках браузера или телефона: ' +
+                'значок замка рядом с адресом сайта → Уведомления → Разрешить. ' +
+                'После этого вернитесь сюда и включите их снова.',
+                'Понятно', function () { updateNotifyPill(); });
+            return;
+        }
+        findPushServer().then(function (server) {
+            if (server) {
+                confirmBox('Уведомления работают',
+                    'Сообщения доходят и при закрытом приложении. ' +
+                    'Если на телефоне их всё равно не видно, проверьте, что для ' +
+                    'WolffMsg разрешены уведомления в настройках самого телефона, ' +
+                    'а приложение установлено на экран «Домой».',
+                    'Выключить уведомления', toggleNotifications);
+                return;
+            }
+            confirmBox('Приходят, только пока приложение открыто',
+                'Чтобы уведомления доходили при закрытом приложении, серверу нужны ' +
+                'ключи доставки. Приложение может создать их прямо сейчас — ' +
+                'останется вставить их в настройки вашего проекта.' +
+                (triedReport('push') ? '\n\nПроверили:\n' + triedReport('push') : ''),
+                'Создать ключи', showPushSetup);
+        });
     }
 
     function toggleNotifications() {
@@ -6258,6 +6439,7 @@
             renderThemes();
             updateAiPill(false);
             updateGifPill(false);
+            updateNotifyPill();          // разрешение могли поменять в телефоне
             updateOnlinePill();
         });
         $('btn-plus').addEventListener('click', openPlus);
@@ -6379,6 +6561,7 @@
             $('attach-menu').classList.add('show');
         });
         $('attach-cancel').addEventListener('click', closeAttachMenu);
+        bindSheetSwipe($('attach-sheet'), closeAttachMenu);
         $('attach-menu').addEventListener('click', function (e) {
             if (e.target === this) closeAttachMenu();
         });
@@ -6395,7 +6578,6 @@
             $('m-gif-file').click();
         });
         $('m-gif-file').addEventListener('change', function () { handlePhotoFile(this); });
-        $('btn-gif').addEventListener('click', openGifs);
         $('gif-close').addEventListener('click', dismissGifs);
         $('gif-search').addEventListener('input', function () {
             // Начали набирать — панель сама показывает найденное.
@@ -6548,7 +6730,15 @@
                 location.reload();
             });
         });
-        $('set-notify').addEventListener('click', toggleNotifications);
+        $('keys-copy').addEventListener('click', copyKeys);
+        $('keys-check').addEventListener('click', recheckPush);
+        $('keys-close').addEventListener('click', function () {
+            $('keys-modal').classList.remove('show');
+        });
+        $('set-notify').addEventListener('click', function () {
+            if (notifyEnabled()) checkNotifications();
+            else toggleNotifications();
+        });
         $('set-sound').addEventListener('click', toggleSound);
         $('set-ai').addEventListener('click', checkAi);
         $('set-gif').addEventListener('click', checkGifs);
@@ -6683,6 +6873,8 @@
         serviceUrls: serviceUrls,
         setServer: setServer,
         currentServer: currentServer,
+        sameVapid: sameVapid,
+        makeVapidKeys: makeVapidKeys,
         setTheme: setTheme,
         state: state,
         api: api,

@@ -48,6 +48,15 @@ async function signUp(nick, name) {
     return { ctx, page };
 }
 
+
+/* Гифки живут под скрепкой: своей кнопки в строке ввода больше нет. */
+async function openGifPanel(page) {
+    await page.click('#btn-attach');
+    await page.waitForSelector('#attach-menu.show', { timeout: 10000 });
+    await page.click('#attach-gif');
+    await page.waitForSelector('#gif-panel:not([hidden])', { timeout: 15000 });
+}
+
 console.log('\n=== WolffMsg e2e (гифки, запись о звонке, строка состояния) ===');
 
 const yura = await signUp(RUN + 'yura', 'Юра');
@@ -119,13 +128,18 @@ await step('виброотклик едва ощутимый', async () => {
 
 /* -------------------------------------------------------------- гифки */
 
-await step('кнопка гифок на месте', async () => {
-    await yura.page.waitForSelector('#btn-gif:not([hidden])', { timeout: 20000 });
+await step('гифки открываются из меню скрепки', async () => {
+    await yura.page.click('#btn-attach');
+    await yura.page.waitForSelector('#attach-menu.show', { timeout: 15000 });
+    await yura.page.click('#attach-gif');
+    await yura.page.waitForSelector('#gif-panel:not([hidden])', { timeout: 15000 });
+    await yura.page.click('#gif-close');
+    await yura.page.waitForFunction(() => document.getElementById('gif-panel').hidden,
+        null, { timeout: 10000 });
 });
 
 await step('панель ищет гифки и не занимает весь экран', async () => {
-    await yura.page.click('#btn-gif');
-    await yura.page.waitForSelector('#gif-panel:not([hidden])', { timeout: 10000 });
+    await openGifPanel(yura.page);
     await yura.page.waitForSelector('#gif-grid .gif-item img', { timeout: 20000 });
 
     const share = await yura.page.evaluate(() => {

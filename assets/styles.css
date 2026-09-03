@@ -582,6 +582,9 @@ body.searching #page-main .search-row { padding-top: calc(var(--safe-top) + 10px
 
 .msg-container {
     flex: 1;
+    /* Без этого список не даёт панели гифок развернуться: flex-элемент по
+       умолчанию не сжимается меньше своего содержимого. */
+    min-height: 0;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
     padding: 16px;
@@ -725,16 +728,6 @@ body.searching #page-main .search-row { padding-top: calc(var(--safe-top) + 10px
 
 /* -------------------------------- гифки -------------------------------- */
 
-.gif-btn {
-    font-size: 13px !important;
-    font-weight: 700;
-    letter-spacing: 0.5px;
-    color: var(--text-muted);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 3px 6px !important;
-    margin-bottom: 6px;
-}
 
 .gif-panel {
     flex: 0 0 auto;
@@ -747,7 +740,13 @@ body.searching #page-main .search-row { padding-top: calc(var(--safe-top) + 10px
     display: flex;
     flex-direction: column;
     animation: gifIn 0.24s var(--ease-out);
+    transition: max-height 0.24s var(--ease-out), height 0.24s var(--ease-out),
+        transform 0.2s var(--ease-out);
 }
+
+/* Развёрнутая панель — почти во весь экран: удобно выбирать. Высота задана
+   жёстко, иначе панель осталась бы по размеру содержимого. */
+.gif-panel.tall { max-height: 82vh; height: 82vh; }
 
 @keyframes gifIn {
     from { opacity: 0; transform: translateY(14px); }
@@ -849,6 +848,89 @@ body.searching #page-main .search-row { padding-top: calc(var(--safe-top) + 10px
     height: auto;
     display: block;
     background: var(--hover);
+}
+
+/* ---------------------------- меню скрепки ----------------------------
+   Выдвижная панель снизу: крупные кнопки, которые видно и в темноте, и
+   на ходу. Закрывается смахиванием вниз, касанием мимо или «Отменой». */
+
+.attach-sheet {
+    width: 100%;
+    max-width: 520px;
+    background: var(--card);
+    border-radius: 22px 22px 0 0;
+    padding: 6px 14px calc(14px + var(--safe-bottom));
+    box-shadow: 0 -12px 32px rgba(0, 0, 0, 0.22);
+    animation: sheetUp 0.26s cubic-bezier(0.18, 0.89, 0.32, 1.1);
+}
+
+@keyframes sheetUp {
+    from { transform: translateY(100%); }
+    to { transform: translateY(0); }
+}
+
+.sheet-grab {
+    width: 38px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--border);
+    margin: 4px auto 12px;
+    touch-action: none;
+    box-sizing: content-box;
+    padding: 8px 34px;
+    background-clip: content-box;
+}
+
+.attach-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+    padding-bottom: 8px;
+}
+
+.attach-tile {
+    border: none;
+    background: none;
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 4px;
+    border-radius: 16px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: transform 0.15s var(--ease-out), background 0.15s var(--ease-out);
+}
+
+.attach-tile:active { transform: scale(0.94); background: var(--hover); }
+
+.tile-ico {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+    font-style: normal;
+    color: #fff;
+}
+
+.tile-ico.photo { background: linear-gradient(135deg, #3f8cff, #5b6ef5); }
+.tile-ico.gif { background: linear-gradient(135deg, #8b5cf6, #d946a6); font-size: 15px; font-weight: 800; letter-spacing: 0.5px; }
+.tile-ico.file { background: linear-gradient(135deg, #f0a33c, #e2713a); }
+
+.attach-cancel {
+    width: 100%;
+    border: none;
+    background: var(--hover);
+    color: var(--text);
+    padding: 14px;
+    border-radius: 14px;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
 }
 
 /* Значок «GIF» в меню скрепки — вместо картинки-эмодзи, которая на части
@@ -1417,6 +1499,17 @@ body.searching #page-main .search-row { padding-top: calc(var(--safe-top) + 10px
 
 .pill.ok { background: rgba(48, 209, 88, 0.18); color: #30d158; }
 .pill.bad { background: rgba(255, 69, 58, 0.18); color: var(--danger); }
+.keys-area {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    text-align: left;
+    resize: none;
+    white-space: pre;
+    overflow: auto;
+}
+
+.pill.warn { background: rgba(255, 179, 64, 0.2); color: #ffb340; }
 
 .version { text-align: center; color: var(--text-muted); font-size: 12px; margin-top: 24px; }
 
@@ -1805,7 +1898,7 @@ body.searching #page-main .search-row { padding-top: calc(var(--safe-top) + 10px
 
 .btn-primary:active, .btn-flat:active, .auth-btn:active, .rec-btn:active { transform: scale(0.96); }
 .hdr-btn:active { transform: scale(0.9); }
-#btn-send:active, #btn-mic:active, #btn-attach:active, .gif-btn:active { transform: scale(0.88); }
+#btn-send:active, #btn-mic:active, #btn-attach:active { transform: scale(0.88); }
 
 /* Список чатов и результаты поиска появляются мягкой волной. */
 #chat-list .f-item { animation: rowIn 0.26s var(--ease-out) backwards; }

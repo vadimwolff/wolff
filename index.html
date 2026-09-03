@@ -139,7 +139,7 @@
 
     <!-- Панель гифок: поиск и сетка превью, открывается над строкой ввода. -->
     <div class="gif-panel" id="gif-panel" hidden>
-        <div class="gif-grab"></div>
+        <div class="gif-grab" id="gif-grab"></div>
         <div class="gif-head">
             <input type="search" id="gif-search" placeholder="Найти гифку"
                    autocomplete="off" autocapitalize="none" spellcheck="false">
@@ -155,7 +155,6 @@
 
     <div class="input-bar" id="input-bar">
         <button type="button" id="btn-attach" title="Прикрепить фото">📎</button>
-        <button type="button" id="btn-gif" class="gif-btn" title="Гифки">GIF</button>
         <input type="file" id="m-file" accept="image/*,video/*" multiple hidden>
         <input type="file" id="m-gif-file" accept="image/gif" hidden>
         <textarea id="m-input" rows="1" placeholder="Сообщение..."></textarea>
@@ -224,11 +223,20 @@
 
 <!-- ================= МОДАЛКИ ================= -->
 <div id="attach-menu" class="modal-overlay">
-    <div class="modal-menu">
-        <div class="modal-item" id="attach-photo">📷 Фото или видео</div>
-        <div class="modal-item" id="attach-gif"><b class="gif-tag">GIF</b> Найти гифку</div>
-        <div class="modal-item" id="attach-file">📁 Гифка из галереи</div>
-        <div class="modal-item cancel" id="attach-cancel">Отмена</div>
+    <div class="attach-sheet" id="attach-sheet">
+        <div class="sheet-grab"></div>
+        <div class="attach-grid">
+            <button type="button" class="attach-tile" id="attach-photo">
+                <i class="tile-ico photo">📷</i><span>Галерея</span>
+            </button>
+            <button type="button" class="attach-tile" id="attach-gif">
+                <i class="tile-ico gif">GIF</i><span>Гифки</span>
+            </button>
+            <button type="button" class="attach-tile" id="attach-file">
+                <i class="tile-ico file">📁</i><span>Файл .gif</span>
+            </button>
+        </div>
+        <button type="button" class="attach-cancel" id="attach-cancel">Отмена</button>
     </div>
 </div>
 
@@ -296,6 +304,22 @@
             <button type="button" class="btn-primary" id="conn-check">Проверить связь</button>
         </div>
         <div class="modal-item cancel" id="conn-close">Закрыть</div>
+    </div>
+</div>
+
+<div id="keys-modal" class="modal-overlay">
+    <div class="modal-sheet">
+        <h3>Ключи доставки</h3>
+        <p class="muted small">Добавьте эти три строки в настройки вашего проекта на
+            Vercel: Settings → Environment Variables → Add. Потом сделайте Redeploy —
+            и уведомления начнут приходить при закрытом приложении.
+            Закрытый ключ (VAPID_PRIVATE_KEY) никому не показывайте.</p>
+        <textarea id="keys-text" class="auth-input keys-area" rows="8" readonly></textarea>
+        <div class="sheet-row">
+            <button type="button" class="btn-flat" id="keys-copy">Скопировать</button>
+            <button type="button" class="btn-primary" id="keys-check">Проверить</button>
+        </div>
+        <div class="modal-item cancel" id="keys-close">Закрыть</div>
     </div>
 </div>
 

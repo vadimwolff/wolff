@@ -45,14 +45,52 @@ await step('вход и открытый чат', async () => {
     await page.waitForSelector('#page-chat.active', { timeout: 15000 });
 });
 
-await step('под скрепкой есть кнопка гифок, и она открывает панель', async () => {
+await step('в строке ввода нет отдельной кнопки гифок', async () => {
+    const gone = await page.evaluate(() => !document.getElementById('btn-gif'));
+    assert(gone, 'кнопка GIF всё ещё в строке ввода');
+});
+
+await step('скрепка открывает выдвижное меню с крупными кнопками', async () => {
     await page.click('#btn-attach');
     await page.waitForSelector('#attach-menu.show', { timeout: 10000 });
+
+    const tiles = await page.evaluate(() => [...document.querySelectorAll('.attach-tile')]
+        .map((t) => ({ text: t.textContent.trim(), h: t.getBoundingClientRect().height })));
+    assert(tiles.length === 3, 'кнопок в меню: ' + tiles.length);
+    assert(tiles.every((t) => t.h >= 80), 'кнопки слишком мелкие: ' + JSON.stringify(tiles));
+
     await page.click('#attach-gif');
     await page.waitForSelector('#gif-panel:not([hidden])', { timeout: 10000 });
 
-    const closed = await page.evaluate(() => document.getElementById('attach-menu').classList.contains('show'));
-    assert(!closed, 'меню скрепки осталось открытым');
+    const open = await page.evaluate(() => document.getElementById('attach-menu').classList.contains('show'));
+    assert(!open, 'меню скрепки осталось открытым');
+});
+
+await step('панель гифок разворачивается на пол-экрана и обратно', async () => {
+    const height = () => page.evaluate(
+        () => document.getElementById('gif-panel').getBoundingClientRect().height);
+
+    await page.waitForSelector('#gif-grid .gif-item', { timeout: 20000 });
+    await page.waitForTimeout(300);            // сетка встала на место
+    const normal = await height();
+
+    await page.click('#gif-grab');
+    await page.waitForFunction(
+        () => document.getElementById('gif-panel').classList.contains('tall'),
+        null, { timeout: 10000 });
+    await page.waitForTimeout(350);
+
+    const tall = await height();
+    assert(tall > normal * 1.4, 'панель не развернулась: ' + normal + ' → ' + tall);
+
+    await page.click('#gif-grab');
+    await page.waitForFunction(
+        () => !document.getElementById('gif-panel').classList.contains('tall'),
+        null, { timeout: 10000 });
+    await page.waitForTimeout(400);            // дожидаемся конца анимации
+
+    const back = await height();
+    assert(Math.abs(back - normal) < 30, 'панель не вернулась к обычному размеру: ' + back);
 });
 
 await step('панель закрывается смахиванием вниз', async () => {
@@ -130,6 +168,51 @@ await step('гифка видна и после возврата в чат', asy
         const last = nodes[nodes.length - 1];
         return last && last.getBoundingClientRect().height > 40;
     }, null, { timeout: 25000 });
+});
+
+/* --------------------------------------------------- уведомления */
+
+await step('в настройках видно, что уведомления доходят и при закрытом приложении', async () => {
+    await ctx.grantPermissions(['notifications'], { origin: BASE });
+    await page.evaluate(() => localStorage.setItem('WM_NOTIFY', 'on'));
+
+    await page.click('#btn-back');
+    await page.waitForSelector('#page-main.active', { timeout: 15000 });
+    await page.click('#btn-settings');
+    await page.waitForSelector('#page-settings.active', { timeout: 15000 });
+
+    await page.waitForFunction(() => {
+        const pill = document.getElementById('notify-state');
+        return pill && pill.textContent === 'и при закрытом';
+    }, null, { timeout: 20000 });
+});
+
+await step('подписка обновляется, когда у сервера сменился ключ', async () => {
+    const checks = await page.evaluate(async () => {
+        const keys = await window.WM.makeVapidKeys();
+        const other = await window.WM.makeVapidKeys();
+        const bytes = (b64) => {
+            const pad = b64.replace(/-/g, '+').replace(/_/g, '/');
+            const raw = atob(pad + '='.repeat((4 - pad.length % 4) % 4));
+            const out = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+            return out;
+        };
+        const sub = { options: { applicationServerKey: bytes(keys.publicKey).buffer } };
+        return {
+            len: keys.publicKey.length,
+            head: keys.publicKey.slice(0, 1),
+            secret: (keys.privateKey || '').length,
+            same: window.WM.sameVapid(sub, keys.publicKey),
+            changed: window.WM.sameVapid(sub, other.publicKey)
+        };
+    });
+
+    assert(checks.len >= 86, 'открытый ключ подозрительно короткий: ' + checks.len);
+    assert(checks.head === 'B', 'ключ не в том формате: ' + checks.head);
+    assert(checks.secret >= 40, 'закрытый ключ не создан');
+    assert(checks.same === true, 'своя же подписка считается устаревшей');
+    assert(checks.changed === false, 'смена ключа сервера не замечена');
 });
 
 await browser.close();
