@@ -15,6 +15,10 @@
  *                   без этого отвечает 403.
  *   TENOR_CLIENT    (необязательно) имя приложения для статистики Tenor
  *
+ *  Если своего ключа для гифок нет, но задан GEMINI_API_KEY, пробуем его же:
+ *  Tenor — сервис Google, и ключ подойдёт, когда в том же проекте Google Cloud
+ *  включён «Tenor API». Не включён — приходит понятное объяснение.
+ *
  *  Если заданы оба ключа, сначала пробуется Giphy, а Tenor остаётся запасным.
  *
  *  Два режима:
@@ -25,6 +29,12 @@
 const GIPHY_KEY = process.env.GIPHY_API_KEY || '';
 const TENOR_KEY = process.env.TENOR_API_KEY || '';
 const TENOR_CLIENT = process.env.TENOR_CLIENT || 'wolffmsg';
+
+/* Tenor — тоже сервис Google, и ключ от Gemini подойдёт ему, если в том же
+   проекте Google Cloud включён «Tenor API». Своего ключа для гифок нет —
+   пробуем этот: в худшем случае придёт понятный отказ 403, из которого видно,
+   что именно нужно включить. */
+const GEMINI_KEY = process.env.GEMINI_API_KEY || '';
 
 /* Файл отдаём только с доменов самих сервисов: превратить прокси в открытый
    «качатель чего угодно» нельзя. */
@@ -121,9 +131,9 @@ function shapeTenor(items) {
     }).filter(Boolean);
 }
 
-async function searchTenor(query) {
+async function searchTenor(query, key = TENOR_KEY) {
     const params = new URLSearchParams({
-        key: TENOR_KEY,
+        key: key,
         client_key: TENOR_CLIENT,
         limit: '24',
         media_filter: 'nanogif,tinygif,gif,tinymp4,mp4',
@@ -174,7 +184,7 @@ export default async function handler(req, res) {
         return;
     }
 
-    if (!GIPHY_KEY && !TENOR_KEY) {
+    if (!GIPHY_KEY && !TENOR_KEY && !GEMINI_KEY) {
         reply(res, 200, {
             ok: false,
             error: 'not_configured',
@@ -186,8 +196,20 @@ export default async function handler(req, res) {
 
     const query = (url.searchParams.get('q') || '').trim().slice(0, 60);
     const providers = [];
-    if (GIPHY_KEY) providers.push(searchGiphy);
-    if (TENOR_KEY) providers.push(searchTenor);
+    if (GIPHY_KEY) providers.push((q) => searchGiphy(q));
+    if (TENOR_KEY) providers.push((q) => searchTenor(q));
+    if (!GIPHY_KEY && !TENOR_KEY && GEMINI_KEY) {
+        providers.push(async (q) => {
+            const result = await searchTenor(q, GEMINI_KEY);
+            if (result.ok || result.error !== 'bad_key') return result;
+            return {
+                ok: false,
+                error: 'bad_key',
+                detail: 'ключ Gemini не подошёл для гифок: в проекте Google Cloud не ' +
+                    'включён Tenor API. Проще добавить GIPHY_API_KEY с developers.giphy.com'
+            };
+        });
+    }
 
     let last = { ok: false, error: 'busy', detail: 'сервис не ответил' };
     for (const search of providers) {

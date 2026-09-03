@@ -146,6 +146,40 @@ await step('помощник не пытается разглядывать ги
         .some((e) => e.textContent.includes('понимаю только текст')), null, { timeout: 30000 });
 });
 
+await step('своя гифка попадает в «Мои» и уходит одним касанием', async () => {
+    const before = await page.locator('.bubble.out .gif-box').count();
+
+    await page.click('#btn-gif');
+    await page.waitForSelector('#gif-panel:not([hidden])', { timeout: 10000 });
+    await page.click('#gif-tabs [data-gtab="mine"]');
+    await page.waitForSelector('#gif-grid .gif-item[data-mine]', { timeout: 15000 });
+
+    const src = await page.getAttribute('#gif-grid .gif-item[data-mine] img', 'src');
+    assert(/^data:image\/gif/.test(String(src)), 'своя гифка хранится не целиком: ' + src);
+
+    await page.click('#gif-grid .gif-item[data-mine]');
+    await page.waitForFunction((n) => document.querySelectorAll('.bubble.out .gif-box').length > n,
+        before, { timeout: 30000 });
+
+    const closed = await page.evaluate(() => document.getElementById('gif-panel').hidden);
+    assert(closed, 'панель гифок осталась открытой');
+});
+
+await step('своя гифка убирается крестиком', async () => {
+    await page.click('#btn-gif');
+    await page.waitForSelector('#gif-panel:not([hidden])', { timeout: 10000 });
+    await page.click('#gif-tabs [data-gtab="mine"]');
+    await page.waitForSelector('#gif-grid .gif-item[data-mine]', { timeout: 15000 });
+
+    await page.click('#gif-grid .gif-item[data-mine] .gif-del');
+    await page.waitForFunction(
+        () => !document.querySelector('#gif-grid .gif-item[data-mine]'), null, { timeout: 15000 });
+
+    const note = await page.textContent('#gif-note');
+    assert(/отправляли/.test(note), 'нет подсказки о своих гифках: ' + note);
+    await page.click('#gif-close');
+});
+
 await step('в настройках видно, почему поиск гифок не работает', async () => {
     await page.route('**/api/gif*', (route) => {
         if (route.request().url().includes('file=')) return route.continue();
@@ -171,10 +205,27 @@ await step('в настройках видно, почему поиск гифо
     assert(pill === 'не настроен', 'состояние поиска: ' + pill);
 
     await page.click('#confirm-cancel');
+
+    // без поиска панель всё равно открывается — сразу на своих гифках
+    await page.click('#btn-settings-done');
+    await page.waitForSelector('#page-main.active', { timeout: 15000 });
+    await page.click('#chat-list .f-item:has-text("WolffAI")');
+    await page.waitForSelector('#page-chat.active', { timeout: 15000 });
+    await page.click('#btn-gif');
+    await page.waitForSelector('#gif-panel:not([hidden])', { timeout: 10000 });
+    await page.waitForFunction(
+        () => document.querySelector('#gif-tabs [data-gtab="mine"]').classList.contains('active'),
+        null, { timeout: 15000 });
+    await page.click('#gif-close');
+
     await page.unroute('**/api/gif*');
 });
 
 await step('поиск гифок снова работает после починки', async () => {
+    await page.click('#btn-back');
+    await page.waitForSelector('#page-main.active', { timeout: 15000 });
+    await page.click('#btn-settings');
+    await page.waitForSelector('#page-settings.active', { timeout: 15000 });
     await page.click('#set-gif');
     await page.waitForFunction(() => {
         const pill = document.getElementById('gif-state');

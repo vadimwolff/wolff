@@ -109,6 +109,7 @@
         serviceTasks: {},
         serviceTried: {},       // что перебрали при поиске — видно в настройках
         gifInfo: null,          // что ответил сервер про поиск гифок
+        gifTab: 'search',       // какая вкладка панели гифок открыта
         aiBusy: false,
         firstChatPaint: true,
         serverChats: true,
@@ -2063,10 +2064,117 @@
         return server.url + '?file=' + encodeURIComponent(fileUrl);
     }
 
-    function setupGifs() {
-        findGifServer().then(function (server) {
-            $('btn-gif').hidden = !server;
+    /* ------------------------------------------------------- свои гифки
+
+       Всё, что вы отправляли или сохранили, лежит на самом устройстве и
+       открывается мгновенно: выбрал — и гифка ушла. Это работает всегда,
+       даже когда поиск не настроен, и никуда не отправляется. */
+
+    var MY_GIFS_MAX = 18;                       // сколько храним
+    var MY_GIF_MAX_BYTES = 2.5 * 1024 * 1024;   // и какого размера
+
+    function gifKey(dataUrl) {
+        // Короткий отпечаток: чтобы одна и та же гифка не легла дважды.
+        var text = String(dataUrl);
+        var hash = 5381;
+        for (var i = 0; i < text.length; i += 7) {
+            hash = ((hash * 33) ^ text.charCodeAt(i)) >>> 0;
+        }
+        return 'g' + hash.toString(36) + '_' + text.length.toString(36);
+    }
+
+    function myGifIndex() {
+        return idbGet('gifs').then(function (list) {
+            return Array.isArray(list) ? list : [];
+        }).catch(function () { return []; });
+    }
+
+    /* Гифка запоминается сразу после отправки — как в списке недавних. */
+    function rememberGif(dataUrl, width, height) {
+        if (!dataUrl || dataUrl.length > MY_GIF_MAX_BYTES) return Promise.resolve(false);
+        var id = gifKey(dataUrl);
+
+        return myGifIndex().then(function (list) {
+            var kept = list.filter(function (item) { return item && item.id !== id; });
+            kept.unshift({ id: id, w: width || 200, h: height || 200, at: Date.now() });
+
+            var extra = kept.slice(MY_GIFS_MAX);
+            var fresh = kept.slice(0, MY_GIFS_MAX);
+            return idbPut('gif:' + id, dataUrl)
+                .then(function () { return idbPut('gifs', fresh); })
+                .then(function () {
+                    return Promise.all(extra.map(function (item) { return idbDelete('gif:' + item.id); }));
+                })
+                .then(function () { return true; });
+        }).catch(function () { return false; });
+    }
+
+    function forgetGif(id) {
+        return myGifIndex().then(function (list) {
+            return idbPut('gifs', list.filter(function (item) { return item && item.id !== id; }));
+        }).then(function () { return idbDelete('gif:' + id); })
+            .catch(function () { return false; });
+    }
+
+    function loadMyGifs() {
+        return myGifIndex().then(function (list) {
+            return Promise.all(list.map(function (item) {
+                return idbGet('gif:' + item.id).then(function (data) {
+                    return data ? { id: item.id, data: data, w: item.w, h: item.h } : null;
+                }).catch(function () { return null; });
+            }));
+        }).then(function (items) { return items.filter(Boolean); });
+    }
+
+    function renderMyGifs() {
+        return loadMyGifs().then(function (items) {
+            if (!items.length) {
+                $('gif-grid').innerHTML = '';
+                renderGifNote('Здесь будут гифки, которые вы отправляли и сохраняли. ' +
+                    'Любую можно переслать одним касанием — и без интернета у сервиса гифок.');
+                return;
+            }
+            renderGifNote('');
+            $('gif-grid').innerHTML = items.map(function (g) {
+                return '<button type="button" class="gif-item" data-mine="' + esc(g.id) + '" ' +
+                    'data-w="' + esc(g.w) + '" data-h="' + esc(g.h) + '">' +
+                    '<img alt="гифка" src="' + esc(g.data) + '">' +
+                    '<span class="gif-del" data-drop="' + esc(g.id) + '">✕</span></button>';
+            }).join('');
         });
+    }
+
+    function sendMyGif(id, width, height) {
+        var room = state.activeRoom;
+        if (!room) return;
+        closeGifs();
+        idbGet('gif:' + id).then(function (data) {
+            if (!data) { toast('Гифка не найдена'); return; }
+            return postGif(room, data, width, height);
+        }).catch(function (err) {
+            if (missingRelation(err)) { state.hasAttachments = false; }
+            toast('Не удалось отправить гифку');
+        });
+    }
+
+    /* --------------------------------------------------------- панель */
+
+    function setupGifs() {
+        // Кнопка нужна всегда: свои гифки работают и без поиска.
+        findGifServer();
+    }
+
+    function setGifTab(tab) {
+        state.gifTab = tab;
+        Array.prototype.forEach.call($('gif-tabs').children, function (btn) {
+            btn.classList.toggle('active', btn.getAttribute('data-gtab') === tab);
+        });
+        $('gif-search-row').hidden = tab !== 'search';
+        $('gif-grid').innerHTML = '';
+        renderGifNote('');
+
+        if (tab === 'mine') renderMyGifs();
+        else searchGifs($('gif-search').value.trim());
     }
 
     function openGifs() {
@@ -2076,7 +2184,12 @@
         panel.hidden = false;
         panel.classList.add('open');
         $('gif-search').value = '';
-        searchGifs('');
+
+        // Открываемся на поиске, если он настроен, иначе — на своих гифках.
+        findGifServer().then(function (server) {
+            if (panel.hidden) return;
+            setGifTab(server ? 'search' : 'mine');
+        });
     }
 
     function closeGifs() {
@@ -2100,7 +2213,12 @@
         clearTimeout(state.gifTimer);
         state.gifTimer = setTimeout(function () {
             findGifServer().then(function (server) {
-                if (!server) { renderGifNote('Поиск гифок не настроен'); return; }
+                if (!server) {
+                    renderGifNote('Поиск гифок пока не настроен: нужен ключ сервиса на ' +
+                        'сервере (Настройки → Поиск гифок). Свои гифки на соседней ' +
+                        'вкладке работают и без него.');
+                    return;
+                }
                 renderGifNote('');
 
                 var url = server.url + (query ? '?q=' + encodeURIComponent(query) : '');
@@ -2159,6 +2277,7 @@
             var id = rows && rows[0] && rows[0].id;
             if (!id) throw WMError('Вложение не сохранено');
             state.photos[String(id)] = dataUrl;
+            rememberGif(dataUrl, width, height);
             sendMessage('wmgif:' + id + ':' + (width || 200) + ':' + (height || 200));
         });
     }
@@ -4058,6 +4177,22 @@
             .catch(function (e) { toast(e.message || 'Не удалось удалить'); });
     }
 
+    /* Гифку из переписки можно оставить себе: она ляжет во вкладку «Мои»
+       и потом отправляется одним касанием в любой чат. */
+    function keepGif(msg) {
+        var body = msg.body === undefined ? msg.text : msg.body;
+        var parts = String(body).split(':');
+        var id = parts[1];
+        var width = Number(parts[2]) || 200;
+        var height = Number(parts[3]) || 200;
+
+        fetchAttachment(id).then(function (data) {
+            return rememberGif(data, width, height);
+        }).then(function (saved) {
+            toast(saved ? 'Гифка сохранена' : 'Эта гифка слишком большая');
+        }).catch(function () { toast('Не удалось сохранить гифку'); });
+    }
+
     /* --------------------------------------------------------- реакции */
 
     function closePicker() {
@@ -4095,6 +4230,9 @@
             html += '<div class="menu-item" data-act="reply"><span>↩️</span> Ответить</div>';
         }
         html += '<div class="menu-item" data-act="copy"><span>📋</span> Копировать</div>';
+        if (isGifRef(msg.body === undefined ? msg.text : msg.body)) {
+            html += '<div class="menu-item" data-act="keepgif"><span>🎞</span> Сохранить гифку</div>';
+        }
         if (hasReactions && !isChannel) {
             html += '<div class="menu-item" data-act="who"><span>😊</span> Кто отреагировал</div>';
         }
@@ -4112,6 +4250,7 @@
             if (pick) setReaction(msgId, pick);
             else if (act === 'reply') startReply(msg);
             else if (act === 'copy') copyMessage(msg);
+            else if (act === 'keepgif') keepGif(msg);
             else if (act === 'who') openReactionList(msgId);
             else if (act === 'delete') {
                 confirmBox('Удалить сообщение?',
@@ -5597,7 +5736,6 @@
         return findGifServer().then(function (server) {
             pill.textContent = server ? 'работает' : 'не настроен';
             pill.className = 'pill ' + (server ? 'ok' : 'bad');
-            $('btn-gif').hidden = !server;
             return server;
         });
     }
@@ -6049,11 +6187,23 @@
         $('btn-gif').addEventListener('click', openGifs);
         $('gif-close').addEventListener('click', closeGifs);
         $('gif-search').addEventListener('input', function () { searchGifs(this.value.trim()); });
+        $('gif-tabs').addEventListener('click', function (e) {
+            var btn = e.target.closest('[data-gtab]');
+            if (btn) setGifTab(btn.getAttribute('data-gtab'));
+        });
         $('gif-grid').addEventListener('click', function (e) {
+            var drop = e.target.closest('[data-drop]');
+            if (drop) {                                  // крестик убирает гифку из своих
+                e.stopPropagation();
+                forgetGif(drop.getAttribute('data-drop')).then(renderMyGifs);
+                return;
+            }
             var item = e.target.closest('.gif-item');
             if (!item) return;
-            sendGif(item.getAttribute('data-gif-url'),
-                Number(item.getAttribute('data-w')), Number(item.getAttribute('data-h')));
+            var w = Number(item.getAttribute('data-w'));
+            var h = Number(item.getAttribute('data-h'));
+            if (item.hasAttribute('data-mine')) sendMyGif(item.getAttribute('data-mine'), w, h);
+            else sendGif(item.getAttribute('data-gif-url'), w, h);
         });
         $('m-file').addEventListener('change', function () { handlePhotoFile(this); });
         $('m-input').addEventListener('input', function () { autoGrow(this); updateComposer(); });

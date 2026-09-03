@@ -724,9 +724,27 @@ body.searching #page-main .search-row { padding-top: calc(var(--safe-top) + 10px
 
 .gif-head { display: flex; gap: 10px; align-items: center; }
 
-.gif-head input {
-    flex: 1;
-    min-width: 0;
+/* Две вкладки: свои гифки (работают всегда) и поиск. */
+.gif-tabs { flex: 1; display: flex; gap: 6px; }
+
+.gif-tabs button {
+    border: none;
+    background: var(--hover);
+    color: var(--text-muted);
+    padding: 7px 16px;
+    border-radius: 999px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.18s var(--ease-out), color 0.18s var(--ease-out);
+}
+
+.gif-tabs button.active { background: var(--accent); color: #fff; }
+
+.gif-search-row { margin-top: 8px; }
+
+.gif-search-row input {
+    width: 100%;
     padding: 9px 14px;
     border-radius: 12px;
     border: none;
@@ -767,6 +785,23 @@ body.searching #page-main .search-row { padding-top: calc(var(--safe-top) + 10px
 
 .gif-item:active { transform: scale(0.94); }
 .gif-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+/* Крестик убирает гифку из своих — как в списке недавних. */
+.gif-item { position: relative; }
+
+.gif-del {
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    width: 20px;
+    height: 20px;
+    line-height: 20px;
+    text-align: center;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    font-size: 12px;
+}
 
 .gif-note { color: var(--text-muted); font-size: 13px; padding: 10px 2px; margin: 0; }
 
