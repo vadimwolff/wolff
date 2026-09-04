@@ -6,12 +6,19 @@ plugins {
     id 'com.android.application'
 }
 
+/* Имя пакета обязано быть вида «что-то.что-то» маленькими латинскими буквами.
+   Обычно его готовит tools/android-appid.mjs, но подстрахуемся и здесь: иначе
+   сборка падает на слиянии манифеста с невнятным сообщением. */
+def rawAppId = (System.getenv('APP_ID') ?: 'app.wolffmsg.shell')
+        .toLowerCase().replaceAll('[^a-z0-9._]', '')
+def safeAppId = rawAppId.contains('.') ? rawAppId : ('app.' + (rawAppId ?: 'wolffmsg'))
+
 android {
     namespace 'app.wolffmsg.shell'
     compileSdk 34
 
     defaultConfig {
-        applicationId System.getenv('APP_ID') ?: 'app.wolffmsg.shell'
+        applicationId safeAppId
         minSdk 23
         targetSdk 34
         versionCode Integer.parseInt(System.getenv('APP_VERSION_CODE') ?: '1')

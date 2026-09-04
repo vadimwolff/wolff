@@ -94,19 +94,16 @@ jobs:
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD || 'wolffmsg' }}
         run: |
           set -e
-          # Имя пакета и номер сборки — из введённых значений.
-          if [ -z "$APP_ID" ]; then
-            APP_ID=$(node -e "
-              const u = new URL('${{ inputs.site }}');
-              console.log(u.host.split('.').reverse().join('.').replace(/[^a-z0-9.]/gi, ''));
-            ")
-          fi
+          # Имя пакета приводится к виду, который принимает Android, что бы ни
+          # ввели в поле: «WolffMsg» → app.wolffmsg, пусто → из адреса сайта.
+          APP_ID=$(node tools/android-appid.mjs "${{ inputs.package }}" "${{ inputs.site }}")
           export APP_ID
           export APP_VERSION_CODE=$(node -e "
-            const p = '${{ inputs.version }}'.split('.').map(Number);
-            console.log((p[0]||0) * 10000 + (p[1]||0) * 100 + (p[2]||0) || 1);
+            const p = String('${{ inputs.version }}').split('.').map(Number);
+            console.log(((p[0]||0) * 10000 + (p[1]||0) * 100 + (p[2]||0)) || 1);
           ")
-          echo "Пакет: $APP_ID, сборка $APP_VERSION_CODE"
+          echo "Пакет: $APP_ID, версия ${{ inputs.version }} (сборка $APP_VERSION_CODE)"
+          echo "Имя пакета: \`$APP_ID\`" >> "$GITHUB_STEP_SUMMARY"
 
           set -o pipefail
           gradle -p android-app --no-daemon --stacktrace assembleRelease bundleRelease 2>&1 \

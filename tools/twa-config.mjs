@@ -11,6 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { appIdFor } from './android-appid.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const FILE = path.join(ROOT, 'android', 'twa-manifest.json');
@@ -22,9 +23,9 @@ if (!/^https:\/\/[^/]+$/.test(site)) {
 }
 
 const host = new URL(site).host;
-const pkg = String(process.argv[3] || '').trim() ||
-    // Имя пакета — перевёрнутый адрес сайта: app.vercel.wolffmsg.twa
-    host.split('.').reverse().join('.').replace(/[^a-z0-9.]/gi, '') + '.twa';
+// Имя пакета приводится к виду, который принимает Android: что бы ни ввели,
+// получится «что-то.что-то» маленькими латинскими буквами.
+const pkg = appIdFor(process.argv[3], site) + '.twa';
 const name = String(process.argv[4] || 'WolffMsg').trim();
 const version = String(process.argv[5] || '').trim();
 
