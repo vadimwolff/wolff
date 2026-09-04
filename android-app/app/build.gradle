@@ -40,6 +40,15 @@ android {
         }
     }
 
+    /* Служебные файлы вроде лицензий встречаются сразу в нескольких
+       библиотеках — берём первый попавшийся, а не падаем. */
+    packaging {
+        resources {
+            excludes += ['META-INF/*.kotlin_module', 'META-INF/AL2.0', 'META-INF/LGPL2.1']
+            pickFirsts += ['META-INF/*']
+        }
+    }
+
     /* Проверка стиля кода не должна ронять сборку приложения: она ищет поводы
        для придирок, а нам нужен готовый файл. */
     lint {
@@ -54,6 +63,19 @@ android {
 }
 
 dependencies {
+    /* Библиотеки тянут разные версии стандартной библиотеки Kotlin. До версии
+       1.8 куски jdk7/jdk8 жили отдельными файлами, а с 1.8 они внутри
+       основной — и одни и те же классы оказываются в сборке дважды
+       («Duplicate class kotlin.…»). Этот список выравнивает версии, и
+       двойников не остаётся. */
+    implementation platform('org.jetbrains.kotlin:kotlin-bom:1.9.24')
+
+    constraints {
+        implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.24'
+        implementation 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.9.24'
+        implementation 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.24'
+    }
+
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'androidx.webkit:webkit:1.11.0'
 }
