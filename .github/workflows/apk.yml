@@ -73,6 +73,12 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: bash tools/android-keystore.sh "${{ inputs.name }}"
 
+      # Место, где лежит Android SDK, иногда не находится само — подскажем явно.
+      - name: Где лежит Android SDK
+        run: |
+          echo "sdk.dir=${ANDROID_SDK_ROOT:-$ANDROID_HOME}" > android-app/local.properties
+          cat android-app/local.properties
+
       - name: Собрать APK и AAB
         env:
           APP_ID: ${{ inputs.package }}
@@ -98,7 +104,23 @@ jobs:
           ")
           echo "Пакет: $APP_ID, сборка $APP_VERSION_CODE"
 
-          gradle -p android-app --no-daemon assembleRelease bundleRelease
+          gradle -p android-app --no-daemon --stacktrace assembleRelease bundleRelease
+
+      # Если сборка упала — забираем журналы, по ним видно причину.
+      - name: Журналы сборки
+        if: failure()
+        run: |
+          mkdir -p out
+          find android-app -name '*.txt' -path '*outputs*' -exec cp {} out/ \; 2>/dev/null || true
+          find ~/.gradle/daemon -name '*.log' -exec tail -200 {} \; > out/gradle-daemon.log 2>/dev/null || true
+          ls -la out || true
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: wolffmsg-android-логи
+          path: out/*
+          if-no-files-found: ignore
 
       - name: Собрать результаты
         run: bash tools/android-collect.sh "${{ inputs.name }}" "${{ steps.keystore.outputs.created }}"
