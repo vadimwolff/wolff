@@ -59,6 +59,10 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-34 build-tools;34.0.0 platform-tools'
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
@@ -104,15 +108,27 @@ jobs:
           ")
           echo "Пакет: $APP_ID, сборка $APP_VERSION_CODE"
 
-          gradle -p android-app --no-daemon --stacktrace assembleRelease bundleRelease
+          set -o pipefail
+          gradle -p android-app --no-daemon --stacktrace assembleRelease bundleRelease 2>&1 \
+            | tee gradle.log
 
-      # Если сборка упала — забираем журналы, по ним видно причину.
-      - name: Журналы сборки
+      # Сборка упала — печатаем причину прямо на странице сборки: её видно
+      # сразу, без раскрытия шагов и без листания журнала.
+      - name: Что пошло не так
         if: failure()
+        run: bash tools/android-why.sh
+
+      # И пробуем собрать хотя бы отладочный пакет: он тоже ставится на
+      # телефон, просто не годится для магазина.
+      - name: Запасной отладочный пакет
+        if: failure()
+        continue-on-error: true
         run: |
           mkdir -p out
-          find android-app -name '*.txt' -path '*outputs*' -exec cp {} out/ \; 2>/dev/null || true
-          find ~/.gradle/daemon -name '*.log' -exec tail -200 {} \; > out/gradle-daemon.log 2>/dev/null || true
+          gradle -p android-app --no-daemon assembleDebug || true
+          DEBUG=$(find android-app -name '*-debug.apk' | head -1 || true)
+          if [ -n "$DEBUG" ]; then cp "$DEBUG" "out/${{ inputs.name }}-отладочный.apk"; fi
+          cp gradle.log out/ 2>/dev/null || true
           ls -la out || true
 
       - uses: actions/upload-artifact@v4
