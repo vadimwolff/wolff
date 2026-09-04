@@ -6858,7 +6858,10 @@
         // Ярлык «Написать» из меню приложения открывает выбор собеседника.
         if (params.get('action') === 'new' && state.me) setTimeout(openPlus, 300);
 
-        if ('serviceWorker' in navigator && location.protocol.indexOf('http') === 0) {
+        // В приложении для Android файлы и так лежат внутри пакета — служебный
+        // работник там не нужен и только мешал бы перехватом запросов.
+        var packaged = location.hostname === 'appassets.androidplatform.net';
+        if ('serviceWorker' in navigator && !packaged && location.protocol.indexOf('http') === 0) {
             navigator.serviceWorker.register('sw.js').catch(function () { /* не критично */ });
         }
     }

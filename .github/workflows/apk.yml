@@ -7,9 +7,17 @@ on:
   workflow_dispatch:
     inputs:
       site:
-        description: 'Адрес сайта, который откроет приложение (https://имя.vercel.app)'
+        description: 'Адрес сервера переписки (https://имя.vercel.app)'
         required: true
         type: string
+      kind:
+        description: 'Что собирать'
+        required: true
+        default: 'встроенное приложение'
+        type: choice
+        options:
+          - 'встроенное приложение'
+          - 'обёртка над сайтом'
       name:
         description: 'Название приложения на телефоне'
         required: false
@@ -30,7 +38,13 @@ permissions:
   contents: read
 
 jobs:
-  build:
+
+  # ------------------------------------------------------------------------
+  #  Встроенное приложение: весь интерфейс лежит внутри пакета и открывается
+  #  сразу, без интернета. В сеть приложение ходит только за перепиской.
+  # ------------------------------------------------------------------------
+  offline:
+    if: inputs.kind == 'встроенное приложение'
     runs-on: ubuntu-latest
 
     steps:
@@ -40,7 +54,77 @@ jobs:
         with:
           node-version: '20'
 
-      # Bubblewrap работает с JDK 17 — на нём и собираем.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Уложить приложение внутрь пакета
+        run: node tools/android-assets.mjs "${{ inputs.site }}"
+
+      - name: Ключ подписи
+        id: keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: bash tools/android-keystore.sh "${{ inputs.name }}"
+
+      - name: Собрать APK и AAB
+        env:
+          APP_ID: ${{ inputs.package }}
+          APP_NAME: ${{ inputs.name }}
+          APP_VERSION_NAME: ${{ inputs.version }}
+          KEYSTORE_PATH: ${{ github.workspace }}/android.keystore
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD || 'wolffmsg' }}
+          KEY_ALIAS: wolffmsg
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD || 'wolffmsg' }}
+        run: |
+          set -e
+          # Имя пакета и номер сборки — из введённых значений.
+          if [ -z "$APP_ID" ]; then
+            APP_ID=$(node -e "
+              const u = new URL('${{ inputs.site }}');
+              console.log(u.host.split('.').reverse().join('.').replace(/[^a-z0-9.]/gi, ''));
+            ")
+          fi
+          export APP_ID
+          export APP_VERSION_CODE=$(node -e "
+            const p = '${{ inputs.version }}'.split('.').map(Number);
+            console.log((p[0]||0) * 10000 + (p[1]||0) * 100 + (p[2]||0) || 1);
+          ")
+          echo "Пакет: $APP_ID, сборка $APP_VERSION_CODE"
+
+          gradle -p android-app --no-daemon assembleRelease bundleRelease
+
+      - name: Собрать результаты
+        run: bash tools/android-collect.sh "${{ inputs.name }}" "${{ steps.keystore.outputs.created }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wolffmsg-android
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
+
+  # ------------------------------------------------------------------------
+  #  Обёртка над сайтом (TWA): пакет крошечный, интерфейс каждый раз берётся
+  #  с сайта. Зато работают уведомления при закрытом приложении.
+  # ------------------------------------------------------------------------
+  twa:
+    if: inputs.kind == 'обёртка над сайтом'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -49,31 +133,14 @@ jobs:
       - name: Подготовить настройки приложения
         run: node tools/twa-config.mjs "${{ inputs.site }}" "${{ inputs.package }}" "${{ inputs.name }}" "${{ inputs.version }}"
 
-      # Ключ подписи. Он должен быть ОДИН И ТОТ ЖЕ у всех сборок: магазин
-      # принимает обновления только с тем же ключом. Если ключ уже сохранён в
-      # секретах репозитория — берём его, иначе создаём новый и кладём в
-      # результаты сборки, чтобы его сохранили.
       - name: Ключ подписи
         id: keystore
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
-          set -e
-          if [ -n "$KEYSTORE_B64" ]; then
-            echo "$KEYSTORE_B64" | base64 -d > android/android.keystore
-            echo "created=false" >> "$GITHUB_OUTPUT"
-            echo "Использую сохранённый ключ подписи."
-          else
-            PASS="${KEYSTORE_PASSWORD:-wolffmsg}"
-            keytool -genkeypair -v \
-              -keystore android/android.keystore \
-              -alias wolffmsg -keyalg RSA -keysize 2048 -validity 10000 \
-              -storepass "$PASS" -keypass "$PASS" \
-              -dname "CN=${{ inputs.name }}, OU=WolffMsg, O=WolffMsg, C=RU"
-            echo "created=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::Создан НОВЫЙ ключ подписи. Сохраните android.keystore из результатов сборки и добавьте его в секреты — без него обновить приложение в магазине будет невозможно."
-          fi
+          bash tools/android-keystore.sh "${{ inputs.name }}"
+          cp android.keystore android/android.keystore
 
       - name: Собрать приложение
         env:
@@ -82,14 +149,10 @@ jobs:
         run: |
           set -e
           npm install -g @bubblewrap/cli@latest
-
           mkdir -p "$HOME/.bubblewrap"
           printf '{"jdkPath":"%s","androidSdkPath":"%s"}\n' "$JAVA_HOME" "$ANDROID_HOME" \
             > "$HOME/.bubblewrap/config.json"
-
           cd android
-          # Проект раскладывается из twa-manifest.json: init задавал бы вопросы,
-          # а update и build берут готовые ответы из файла.
           bubblewrap update --skipVersionUpgrade || echo "update пропущен — проект соберёт build"
           bubblewrap build --skipPwaValidation
 
@@ -99,18 +162,15 @@ jobs:
         run: |
           set -e
           mkdir -p out
-          FP=$(keytool -list -v -keystore android/android.keystore -alias wolffmsg \
+          FP=$(keytool -list -v -keystore android.keystore -alias wolffmsg \
                 -storepass "$PASS" | grep -m1 'SHA256:' | sed 's/.*SHA256: *//' | tr -d ' \r')
           export FP
           node tools/assetlinks.mjs > out/assetlinks.json
-          cat out/assetlinks.json
-
           {
-            echo "### Приложение собрано"
+            echo "### Обёртка над сайтом собрана"
             echo ""
             echo "Чтобы приложение открывалось без адресной строки браузера, добавьте в"
-            echo "репозиторий файл \`.well-known/assetlinks.json\` с таким содержимым и"
-            echo "выложите сайт заново:"
+            echo "репозиторий файл \`.well-known/assetlinks.json\` с таким содержимым:"
             echo ""
             echo '```json'
             cat out/assetlinks.json
@@ -118,22 +178,11 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Собрать результаты
-        run: |
-          set -e
-          mkdir -p out
-          APK=$(find android -maxdepth 3 -name '*.apk' | head -1 || true)
-          AAB=$(find android -maxdepth 3 -name '*.aab' | head -1 || true)
-          if [ -n "$APK" ]; then cp "$APK" "out/${{ inputs.name }}.apk"; fi
-          if [ -n "$AAB" ]; then cp "$AAB" "out/${{ inputs.name }}.aab"; fi
-          if [ "${{ steps.keystore.outputs.created }}" = "true" ]; then
-            cp android/android.keystore out/android.keystore
-            base64 -w0 android/android.keystore > out/android.keystore.base64.txt
-          fi
-          ls -la out
+        run: bash tools/android-collect.sh "${{ inputs.name }}" "${{ steps.keystore.outputs.created }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wolffmsg-android
+          name: wolffmsg-android-twa
           path: out/*
           if-no-files-found: error
           retention-days: 30

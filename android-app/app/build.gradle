@@ -1,0 +1,54 @@
+/* Приложение-оболочка: весь интерфейс лежит внутри пакета, в app/src/main/assets/www.
+   Название, версия и имя пакета приходят из переменных окружения — их задаёт
+   сборка, чтобы не править этот файл руками. */
+
+plugins {
+    id 'com.android.application'
+}
+
+def env = { String name, String fallback -> System.getenv(name) ?: fallback }
+
+android {
+    namespace 'app.wolffmsg.shell'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId env('APP_ID', 'app.wolffmsg.shell')
+        minSdk 23
+        targetSdk 34
+        versionCode env('APP_VERSION_CODE', '1').toInteger()
+        versionName env('APP_VERSION_NAME', '1.0.0')
+        resValue 'string', 'app_name', env('APP_NAME', 'WolffMsg')
+    }
+
+    signingConfigs {
+        release {
+            def path = System.getenv('KEYSTORE_PATH')
+            if (path) {
+                storeFile file(path)
+                storePassword env('KEYSTORE_PASSWORD', '')
+                keyAlias env('KEY_ALIAS', 'wolffmsg')
+                keyPassword env('KEY_PASSWORD', env('KEYSTORE_PASSWORD', ''))
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (System.getenv('KEYSTORE_PATH')) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.webkit:webkit:1.11.0'
+}

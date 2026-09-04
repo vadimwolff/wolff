@@ -19,7 +19,10 @@ import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+/* WM_ROOT — какую папку отдавать как сайт. По умолчанию сам репозиторий, но
+   для проверки собранного приложения указывают папку из пакета Android. */
+const ROOT = path.resolve(process.env.WM_ROOT ||
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '..'));
 const PORT = Number(process.argv[2] || 8123);
 
 /* WM_LEGACY=1 — эмуляция «старой» базы: только profiles и messages, пароли

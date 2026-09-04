@@ -14,9 +14,9 @@ function start(port, extraEnv = {}) {
     });
 }
 
-function run(script, env = {}) {
+function run(script, env = {}, args = []) {
     return new Promise((resolve) => {
-        const p = spawn(process.execPath, [path.join(ROOT, script)], {
+        const p = spawn(process.execPath, [path.join(ROOT, script), ...args], {
             cwd: ROOT,
             env: { ...process.env, ...env },
             stdio: 'inherit'
@@ -24,6 +24,10 @@ function run(script, env = {}) {
         p.on('exit', (code) => resolve(code || 0));
     });
 }
+
+/* Приложение внутри пакета Android проверяется отдельно: сначала собираем
+   его папку, потом отдаём её как сайт без серверной части. */
+await run('tools/android-assets.mjs', {}, ['https://localhost:8443']);
 
 const servers = [
     start(8123),                            // обычная схема
@@ -33,7 +37,11 @@ const servers = [
     start(8127, { WM_OLDCHATS: '1' }),      // база без колонок каналов и ответов
     start(8128, { WM_AI: 'busy' }),         // помощник исчерпал бесплатный лимит
     start(8129, { WM_NOAPI: '1' }),         // сайт без серверной части (GitHub Pages)
-    start(8443, { WM_TLS: '1' })            // сервер приложения на другом домене, по https
+    start(8443, { WM_TLS: '1' }),           // сервер приложения на другом домене, по https
+    start(8130, {                           // файлы из пакета Android
+        WM_NOAPI: '1',
+        WM_ROOT: 'android-app/app/src/main/assets/www'
+    })
 ];
 await new Promise((r) => setTimeout(r, 3000));
 
@@ -63,6 +71,10 @@ code += await run('tools/e2e-v61.mjs', { WM_BASE: 'http://localhost:8123' });
 code += await run('tools/e2e-v60.mjs', {
     WM_BASE_TLS: 'https://localhost:8443',
     WM_BASE_SITE: 'http://localhost:8129'
+});
+code += await run('tools/e2e-v62.mjs', {
+    WM_BASE_PACK: 'http://localhost:8130',
+    WM_BASE_TLS: 'https://localhost:8443'
 });
 code += await run('tools/e2e-push.mjs');
 code += await run('tools/e2e-schema.mjs', {
